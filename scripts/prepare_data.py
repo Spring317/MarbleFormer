@@ -97,16 +97,23 @@ def prepare_local_bud500(
 
     Expected structure (any of these are supported):
         speech_data_root/
+            dataset_dict.json     # HuggingFace load_from_disk format (.arrow)
             train/
-                *.wav | *.flac
+                *.arrow + state.json
             test/
-                *.wav | *.flac
+                *.arrow + state.json
         OR
-            *.wav  (flat directory — all treated as the given split)
+            train/
+                *.parquet
         OR
-            parquet files with audio + transcription columns
+            train/
+                *.jsonl | *.json  (NeMo manifest)
+        OR
+            train/
+                *.wav | *.flac    (raw audio + sidecar .txt)
 
-    The function auto-detects whether split subdirectories exist.
+    The function auto-detects the format in priority order:
+    Arrow → Parquet → JSONL → raw audio.
 
     Parameters
     ----------
@@ -127,11 +134,18 @@ def prepare_local_bud500(
 
     if manifest_path.exists():
         n_lines = sum(1 for _ in open(manifest_path))
-        logger.info(
-            "Speech manifest already exists: %s (%d samples)",
-            manifest_path, n_lines,
-        )
-        return manifest_path
+        if n_lines > 0:
+            logger.info(
+                "Speech manifest already exists: %s (%d samples)",
+                manifest_path, n_lines,
+            )
+            return manifest_path
+        else:
+            logger.warning(
+                "Speech manifest %s exists but is empty — regenerating.",
+                manifest_path,
+            )
+            manifest_path.unlink()
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -146,6 +160,18 @@ def prepare_local_bud500(
             split, speech_data_root,
         )
 
+    # --- Check for HuggingFace Arrow format (load_from_disk) ---
+    # This is the format saved by datasets.save_to_disk() and used by
+    # HuggingFace datasets cache. It contains .arrow files + state.json.
+    arrow_files = sorted(search_root.glob("*.arrow"))
+    has_dataset_dict = (speech_data_root / "dataset_dict.json").exists()
+    has_state_json = (search_root / "state.json").exists()
+
+    if arrow_files and (has_dataset_dict or has_state_json):
+        return _manifest_from_arrow(
+            speech_data_root, out_dir, split, max_samples
+        )
+
     # --- Check for parquet files (HuggingFace cache format) ---
     parquet_files = sorted(search_root.glob("*.parquet"))
     if parquet_files:
@@ -156,6 +182,11 @@ def prepare_local_bud500(
     # --- Check for JSONL manifest (NeMo format) ---
     existing_manifests = list(search_root.glob("*.jsonl")) + \
                          list(search_root.glob("*.json"))
+    # Filter out dataset_info.json / state.json / dataset_dict.json
+    existing_manifests = [
+        p for p in existing_manifests
+        if p.name not in {"dataset_info.json", "state.json", "dataset_dict.json"}
+    ]
     if existing_manifests:
         return _manifest_from_nemo_jsonl(
             existing_manifests, out_dir, split, max_samples
@@ -165,6 +196,110 @@ def prepare_local_bud500(
     return _manifest_from_audio_dir(
         search_root, out_dir, split, max_samples
     )
+
+
+def _manifest_from_arrow(
+    dataset_root: Path,
+    out_dir: Path,
+    split: str,
+    max_samples: int | None,
+) -> Path:
+    """Generate manifest from HuggingFace Arrow format (load_from_disk).
+
+    This handles the format produced by datasets.save_to_disk(), which
+    contains .arrow files + state.json + dataset_dict.json.
+
+    Structure:
+        dataset_root/
+            dataset_dict.json
+            train/
+                data-00000-of-00105.arrow
+                ...
+                state.json
+                dataset_info.json
+    """
+    from datasets import load_from_disk
+
+    manifest_path = out_dir / f"speech_{split}.jsonl"
+    wav_dir = out_dir / f"speech_{split}_wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Loading HuggingFace Arrow dataset from %s (split='%s')...",
+                dataset_root, split)
+
+    ds_dict = load_from_disk(str(dataset_root))
+
+    # Handle both DatasetDict and single Dataset
+    if hasattr(ds_dict, 'keys'):
+        if split in ds_dict:
+            ds = ds_dict[split]
+        else:
+            available = list(ds_dict.keys())
+            logger.error(
+                "Split '%s' not found. Available splits: %s", split, available
+            )
+            # Fall back to first available split
+            ds = ds_dict[available[0]]
+            logger.warning("Using split '%s' instead.", available[0])
+    else:
+        ds = ds_dict
+
+    total = len(ds)
+    logger.info("  Found %d samples in split '%s'", total, split)
+
+    count = 0
+    skipped = 0
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        for i, sample in enumerate(ds):
+            if max_samples and count >= max_samples:
+                break
+
+            # BUD500 uses "transcription" as the text field
+            text = sample.get("transcription", sample.get("text", ""))
+            if not text or not text.strip():
+                skipped += 1
+                continue
+
+            audio = sample.get("audio")
+            if audio is None:
+                skipped += 1
+                continue
+
+            # Extract audio data
+            waveform_array = audio.get("array") if isinstance(audio, dict) else None
+            sr = audio.get("sampling_rate", TARGET_SAMPLE_RATE) if isinstance(audio, dict) else TARGET_SAMPLE_RATE
+
+            if waveform_array is None:
+                skipped += 1
+                continue
+
+            # Save waveform to wav
+            wav_path = wav_dir / f"{count:08d}.wav"
+            if not wav_path.exists():
+                import numpy as np
+                waveform = np.array(waveform_array, dtype=np.float32)
+                sf.write(str(wav_path), waveform, sr)
+
+            duration = len(waveform_array) / sr
+            entry = {
+                "audio_filepath": str(wav_path.resolve()),
+                "text": text.strip(),
+                "duration": round(duration, 4),
+            }
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            count += 1
+
+            if count % 5000 == 0:
+                logger.info(
+                    "  Processed %d / %d samples (%.1f%%)...",
+                    count, total, 100 * (i + 1) / total,
+                )
+
+    logger.info(
+        "Created speech manifest (Arrow): %s (%d samples, %d skipped)",
+        manifest_path, count, skipped,
+    )
+    return manifest_path
 
 
 def _manifest_from_parquet(
