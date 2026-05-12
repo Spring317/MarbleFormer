@@ -240,7 +240,19 @@ def _manifest_from_nemo_jsonl(
                 for line in in_f:
                     if max_samples and count >= max_samples:
                         break
-                    entry = json.loads(line.strip())
+                    line_stripped = line.strip()
+                    if not line_stripped:
+                        continue
+                    try:
+                        entry = json.loads(line_stripped)
+                    except json.JSONDecodeError:
+                        try:
+                            import ast
+                            entry = ast.literal_eval(line_stripped)
+                        except (SyntaxError, ValueError):
+                            logger.warning("Skipping malformed line in %s", jsonl_file.name)
+                            continue
+
                     # Ensure required fields
                     if "audio_filepath" not in entry:
                         continue
