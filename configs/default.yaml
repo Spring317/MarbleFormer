@@ -57,9 +57,17 @@ tokenizer:
 
 # --- Dataset ---
 data:
-  bud500_name: "linhtran92/viet_bud500"
-  noise_manifest: "data/noise/manifest.jsonl"
-  noise_dir: "data/noise/audio"
+  # Local BUD500 dataset (already downloaded — no re-download)
+  bud500_local_dir: "data/bud500"        # root dir with train/ and test/ subdirs
+
+  # Background noise data
+  noise_dir: "data/background_noise"             # raw Freesound downloads (any format)
+  noise_resampled_dir: "data/background_noise_resampled"  # resampled 16kHz mono WAV
+  noise_manifest: "data/manifest/noise.jsonl"
+
+  # Manifest output
+  manifest_dir: "data/manifest"
+
   speech_noise_ratio: 0.7   # 70% speech, 30% noise per epoch
   max_audio_len_sec: 15.0
   min_audio_len_sec: 0.5

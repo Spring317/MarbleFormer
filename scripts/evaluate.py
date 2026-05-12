@@ -67,10 +67,10 @@ def main() -> None:
 
     # Dataset
     data_cfg = cfg["data"]
+    manifest_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
     test_dataset = VADASRDataset.from_manifests(
-        speech_manifest=Path(f"data/speech_{args.split}.jsonl"),
-        noise_manifest=Path(data_cfg.get("noise_manifest", "data/noise/manifest.jsonl")),
-        noise_dir=data_cfg.get("noise_dir", "data/noise/audio"),
+        speech_manifest=manifest_dir / f"speech_{args.split}.jsonl",
+        noise_manifest=Path(data_cfg.get("noise_manifest", "data/manifest/noise.jsonl")),
         tokenizer=tokenizer,
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),

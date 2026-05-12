@@ -101,15 +101,14 @@ def main() -> None:
 
     # ---- Datasets ----
     logger.info("Loading datasets...")
-    speech_manifest_train = Path("data/speech_train.jsonl")
-    speech_manifest_test = Path("data/speech_test.jsonl")
-    noise_manifest = Path(data_cfg.get("noise_manifest", "data/noise/manifest.jsonl"))
-    noise_dir = data_cfg.get("noise_dir", "data/noise/audio")
+    manifest_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
+    speech_manifest_train = manifest_dir / "speech_train.jsonl"
+    speech_manifest_test = manifest_dir / "speech_test.jsonl"
+    noise_manifest = Path(data_cfg.get("noise_manifest", "data/manifest/noise.jsonl"))
 
     train_dataset = VADASRDataset.from_manifests(
         speech_manifest=speech_manifest_train,
         noise_manifest=noise_manifest,
-        noise_dir=noise_dir,
         tokenizer=tokenizer,
         augmentation=augmentation,
         sample_rate=cfg["features"]["sample_rate"],
@@ -121,7 +120,6 @@ def main() -> None:
     val_dataset = VADASRDataset.from_manifests(
         speech_manifest=speech_manifest_test,
         noise_manifest=noise_manifest,
-        noise_dir=noise_dir,
         tokenizer=tokenizer,
         augmentation=None,  # no augmentation for validation
         sample_rate=cfg["features"]["sample_rate"],
