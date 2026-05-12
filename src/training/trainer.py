@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
 import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
@@ -145,7 +147,7 @@ class Trainer:
 
         self.optimizer.zero_grad()
 
-        for batch_idx, batch in enumerate(self.train_loader):
+        for batch_idx, batch in enumerate(tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]", leave=False)):
             waveform = batch["waveform"].to(self.device)
             wav_lengths = batch["wav_lengths"].to(self.device)
             token_ids = batch["token_ids"].to(self.device)
@@ -171,10 +173,15 @@ class Trainer:
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
+                scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
-                self.scheduler.step()
+                
+                scale_after = self.scaler.get_scale()
+                if scale_before <= scale_after:
+                    self.scheduler.step()
+                    
                 self.global_step += 1
 
             running["total"] += losses["total"].item()
@@ -191,7 +198,7 @@ class Trainer:
         running = {"total": 0.0, "vad": 0.0, "ctc": 0.0}
         n_batches = 0
 
-        for batch in self.val_loader:
+        for batch in tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]", leave=False):
             waveform = batch["waveform"].to(self.device)
             wav_lengths = batch["wav_lengths"].to(self.device)
             token_ids = batch["token_ids"].to(self.device)
