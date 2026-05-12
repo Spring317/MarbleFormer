@@ -28,7 +28,7 @@ from .ctc_head import CTCHead
 class VADASROutput:
     """Structured output from the VADASR model."""
 
-    gate_prob: torch.Tensor         # [B] — speech probability
+    gate_logits: torch.Tensor       # [B] — speech logits (pre-sigmoid)
     ctc_log_probs: Optional[torch.Tensor]  # [B, T, V+1] or None
     ctc_lengths: Optional[torch.Tensor]    # [B] or None
     has_voice: torch.Tensor         # [B] bool — gate decisions
@@ -107,7 +107,7 @@ class VADASRModel(nn.Module):
 
         Returns
         -------
-        VADASROutput with gate_prob, ctc_log_probs, ctc_lengths, has_voice.
+        VADASROutput with gate_logits, ctc_log_probs, ctc_lengths, has_voice.
         """
         # Feature extraction
         mel_features, feat_lengths = self.mel_extractor(waveform, wav_lengths)
@@ -116,8 +116,8 @@ class VADASRModel(nn.Module):
         marble_out, marble_lengths = self.marblenet(mel_features, feat_lengths)
 
         # VAD gate
-        gate_prob = self.vad_gate(marble_out, marble_lengths)
-        has_voice = self.vad_gate.decide(gate_prob)
+        gate_logits = self.vad_gate(marble_out, marble_lengths)
+        has_voice = self.vad_gate.decide(gate_logits)
 
         # Conformer encoder (always runs during training)
         conformer_out, ctc_lengths = self.conformer(marble_out, marble_lengths)
@@ -126,7 +126,7 @@ class VADASRModel(nn.Module):
         ctc_log_probs = self.ctc_head(conformer_out)
 
         return VADASROutput(
-            gate_prob=gate_prob,
+            gate_logits=gate_logits,
             ctc_log_probs=ctc_log_probs,
             ctc_lengths=ctc_lengths,
             has_voice=has_voice,
@@ -158,13 +158,13 @@ class VADASRModel(nn.Module):
         """
         mel_features, feat_lengths = self.mel_extractor(waveform, wav_lengths)
         marble_out, marble_lengths = self.marblenet(mel_features, feat_lengths)
-        gate_prob = self.vad_gate(marble_out, marble_lengths)
-        has_voice = self.vad_gate.decide(gate_prob)
+        gate_logits = self.vad_gate(marble_out, marble_lengths)
+        has_voice = self.vad_gate.decide(gate_logits)
 
         # Early exit: if no sample in the batch has voice
         if not has_voice.any():
             return VADASROutput(
-                gate_prob=gate_prob,
+                gate_logits=gate_logits,
                 ctc_log_probs=None,
                 ctc_lengths=None,
                 has_voice=has_voice,
@@ -199,7 +199,7 @@ class VADASRModel(nn.Module):
         full_lengths[voice_indices] = ctc_lengths
 
         return VADASROutput(
-            gate_prob=gate_prob,
+            gate_logits=gate_logits,
             ctc_log_probs=full_ctc,
             ctc_lengths=full_lengths,
             has_voice=has_voice,

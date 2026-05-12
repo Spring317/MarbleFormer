@@ -62,8 +62,8 @@ def main() -> None:
     wav_lengths = torch.tensor([seq_len, seq_len // 2])
 
     output = model(waveform, wav_lengths)
-    print(f"  gate_prob shape     : {output.gate_prob.shape}")
-    print(f"  gate_prob values    : {output.gate_prob.detach().numpy()}")
+    print(f"  gate_logits shape   : {output.gate_logits.shape}")
+    print(f"  gate_logits values  : {output.gate_logits.detach().numpy()}")
     print(f"  ctc_log_probs shape : {output.ctc_log_probs.shape}")
     print(f"  ctc_lengths         : {output.ctc_lengths.detach().numpy()}")
     print(f"  has_voice           : {output.has_voice.detach().numpy()}")
@@ -79,7 +79,7 @@ def main() -> None:
     has_voice = torch.tensor([True, False])
 
     losses = criterion(
-        gate_prob=output.gate_prob,
+        gate_logits=output.gate_logits,
         ctc_log_probs=output.ctc_log_probs,
         ctc_lengths=output.ctc_lengths,
         token_ids=token_ids,
@@ -115,7 +115,8 @@ def main() -> None:
     model.vad_gate.threshold = 0.99  # force early exit for test
 
     inf_output = model.inference(noise, noise_len)
-    print(f"  Gate prob  : {inf_output.gate_prob.item():.4f}")
+    print(f"  Gate logit : {inf_output.gate_logits.item():.4f}")
+    print(f"  Gate prob  : {torch.sigmoid(inf_output.gate_logits).item():.4f}")
     print(f"  Has voice  : {inf_output.has_voice.item()}")
     print(f"  CTC output : {'None (early exit!)' if inf_output.ctc_log_probs is None else inf_output.ctc_log_probs.shape}")
 

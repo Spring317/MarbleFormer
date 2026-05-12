@@ -155,7 +155,7 @@ class Trainer:
             with autocast(enabled=self.use_amp):
                 output = self.model(waveform, wav_lengths)
                 losses = self.criterion(
-                    gate_prob=output.gate_prob,
+                    gate_logits=output.gate_logits,
                     ctc_log_probs=output.ctc_log_probs,
                     ctc_lengths=output.ctc_lengths,
                     token_ids=token_ids,
@@ -200,7 +200,7 @@ class Trainer:
 
             output = self.model(waveform, wav_lengths)
             losses = self.criterion(
-                gate_prob=output.gate_prob,
+                gate_logits=output.gate_logits,
                 ctc_log_probs=output.ctc_log_probs,
                 ctc_lengths=output.ctc_lengths,
                 token_ids=token_ids,

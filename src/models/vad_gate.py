@@ -59,7 +59,7 @@ class VADGate(nn.Module):
     def forward(
         self, encoder_out: torch.Tensor, feat_lengths: torch.Tensor
     ) -> torch.Tensor:
-        """Compute speech probability.
+        """Compute speech logits (pre-sigmoid).
 
         Parameters
         ----------
@@ -70,8 +70,8 @@ class VADGate(nn.Module):
 
         Returns
         -------
-        prob : Tensor [B]
-            Speech probability in [0, 1].
+        logits : Tensor [B]
+            Raw logits (apply sigmoid to get probabilities).
         """
         # Masked global average pooling
         batch_size = encoder_out.size(0)
@@ -82,15 +82,26 @@ class VADGate(nn.Module):
             pooled.append(encoder_out[i, :, :valid_len].mean(dim=-1))
         pooled_tensor = torch.stack(pooled, dim=0)  # [B, C]
 
-        logit = self.classifier(pooled_tensor).squeeze(-1)  # [B]
-        prob = torch.sigmoid(logit / self.temperature)
-        return prob
+        logits = self.classifier(pooled_tensor).squeeze(-1)  # [B]
+        return logits / self.temperature
 
-    def decide(self, prob: torch.Tensor) -> torch.Tensor:
+    def probabilities(
+        self, encoder_out: torch.Tensor, feat_lengths: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute speech probability in [0, 1]."""
+        return torch.sigmoid(self.forward(encoder_out, feat_lengths))
+
+    def decide(self, logits: torch.Tensor) -> torch.Tensor:
         """Binary decision: is there speech?
+
+        Parameters
+        ----------
+        logits : Tensor [B]
+            Raw logits from forward().
 
         Returns
         -------
         Tensor [B] of bool — True if speech detected.
         """
+        prob = torch.sigmoid(logits)
         return prob >= self.threshold

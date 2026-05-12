@@ -33,7 +33,7 @@ class VADASRLoss(nn.Module):
         super().__init__()
         self.lambda_vad = lambda_vad
         self.lambda_ctc = lambda_ctc
-        self.bce_loss = nn.BCELoss()
+        self.bce_loss = nn.BCEWithLogitsLoss()
         self.ctc_loss = nn.CTCLoss(blank=blank_id, zero_infinity=True)
 
     @classmethod
@@ -46,7 +46,7 @@ class VADASRLoss(nn.Module):
 
     def forward(
         self,
-        gate_prob: torch.Tensor,
+        gate_logits: torch.Tensor,
         ctc_log_probs: torch.Tensor,
         ctc_lengths: torch.Tensor,
         token_ids: torch.Tensor,
@@ -57,7 +57,7 @@ class VADASRLoss(nn.Module):
 
         Parameters
         ----------
-        gate_prob     : [B]         — predicted speech probability
+        gate_logits   : [B]         — predicted speech logits (pre-sigmoid)
         ctc_log_probs : [B, T, V+1] — CTC log probabilities
         ctc_lengths   : [B]         — valid CTC output lengths
         token_ids     : [B, S]      — target token sequences
@@ -68,9 +68,9 @@ class VADASRLoss(nn.Module):
         -------
         dict with 'total', 'vad', 'ctc' loss tensors.
         """
-        # --- VAD Loss (Binary Cross-Entropy) ---
+        # --- VAD Loss (Binary Cross-Entropy with Logits) ---
         vad_target = has_voice.float()
-        vad_loss = self.bce_loss(gate_prob, vad_target)
+        vad_loss = self.bce_loss(gate_logits, vad_target)
 
         # --- CTC Loss (masked for noise samples) ---
         voice_mask = has_voice
@@ -92,7 +92,7 @@ class VADASRLoss(nn.Module):
                 input_lengths, target_lengths,
             )
         else:
-            ctc_loss = torch.tensor(0.0, device=gate_prob.device)
+            ctc_loss = torch.tensor(0.0, device=gate_logits.device)
 
         total = self.lambda_vad * vad_loss + self.lambda_ctc * ctc_loss
 

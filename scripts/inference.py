@@ -122,7 +122,7 @@ def main() -> None:
         elapsed_ms = (time.time() - t0) * 1000
 
         has_voice = output.has_voice[0].item()
-        gate_prob = output.gate_prob[0].item()
+        gate_prob = torch.sigmoid(output.gate_logits[0]).item()
 
         if has_voice and output.ctc_log_probs is not None:
             text = ctc_greedy_decode(
