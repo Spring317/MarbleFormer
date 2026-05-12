@@ -9,6 +9,7 @@ VAD labels.
 from __future__ import annotations
 
 import json
+import logging
 import random
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ import numpy as np
 import torch
 import torchaudio
 from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
 
 
 class VADASRDataset(Dataset):
@@ -221,6 +224,7 @@ class VADASRDataset(Dataset):
     ) -> "VADASRDataset":
         """Build from two JSONL manifests (speech + noise)."""
         speech_data = []
+        speech_skipped = 0
         speech_manifest = Path(speech_manifest)
         if speech_manifest.exists():
             with open(speech_manifest, "r") as f:
@@ -229,12 +233,21 @@ class VADASRDataset(Dataset):
                     path = entry["audio_filepath"]
                     if speech_dir:
                         path = str(Path(speech_dir) / path)
-                    speech_data.append({
-                        "audio_path": path,
-                        "text": entry.get("text", ""),
-                    })
+                    if Path(path).exists():
+                        speech_data.append({
+                            "audio_path": path,
+                            "text": entry.get("text", ""),
+                        })
+                    else:
+                        speech_skipped += 1
+        if speech_skipped > 0:
+            logger.warning(
+                "Skipped %d speech entries with missing audio files",
+                speech_skipped,
+            )
 
         noise_data = []
+        noise_skipped = 0
         noise_manifest_path = Path(noise_manifest)
         if noise_manifest_path.exists():
             with open(noise_manifest_path, "r") as f:
@@ -243,7 +256,15 @@ class VADASRDataset(Dataset):
                     path = entry["audio_filepath"]
                     if noise_dir:
                         path = str(Path(noise_dir) / path)
-                    noise_data.append({"audio_path": path})
+                    if Path(path).exists():
+                        noise_data.append({"audio_path": path})
+                    else:
+                        noise_skipped += 1
+        if noise_skipped > 0:
+            logger.warning(
+                "Skipped %d noise entries with missing audio files",
+                noise_skipped,
+            )
 
         return cls(
             speech_data=speech_data,
