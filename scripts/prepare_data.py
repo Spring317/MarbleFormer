@@ -1028,6 +1028,46 @@ def generate_synthetic_noise(
     return generated_count, generated_duration
 
 
+def subsample_noise_manifest(
+    noise_manifest: Path, target_duration_sec: float
+) -> None:
+    """Randomly subsample the noise manifest to exactly match a target duration.
+    
+    Parameters
+    ----------
+    noise_manifest : Path
+        Path to the noise JSONL manifest.
+    target_duration_sec : float
+        Maximum allowed duration in seconds.
+    """
+    entries = []
+    with open(noise_manifest, "r", encoding="utf-8") as f:
+        for line in f:
+            entries.append(json.loads(line.strip()))
+            
+    random.shuffle(entries)
+    
+    selected = []
+    current_dur = 0.0
+    
+    for entry in entries:
+        dur = float(entry.get("duration", 0.0))
+        selected.append(entry)
+        current_dur += dur
+        if current_dur >= target_duration_sec:
+            break
+            
+    # Overwrite the manifest with the subsampled entries
+    with open(noise_manifest, "w", encoding="utf-8") as f:
+        for entry in selected:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            
+    logger.info(
+        "  ✓ Subsampled noise manifest down to %d samples, %.2f hours",
+        len(selected), current_dur / 3600
+    )
+
+
 def balance_noise_to_speech(
     speech_manifest: Path,
     noise_manifest: Path,
@@ -1079,9 +1119,18 @@ def balance_noise_to_speech(
         speech_stats.total_duration_sec - noise_stats.total_duration_sec
     )
 
-    if samples_deficit <= 0 and duration_deficit <= 0:
+    if duration_deficit <= 0:
         logger.info(
-            "  ✓ Noise already balanced (≥ speech in both count and duration)"
+            "  Noise duration exceeds speech. Trimming noise to match speech hours..."
+        )
+        subsample_noise_manifest(noise_manifest, speech_stats.total_duration_sec)
+        
+        # Re-count after subsampling
+        final_stats = count_manifest_stats(noise_manifest)
+        logger.info(
+            "  ✓ Balanced noise manifest: %d samples, %.2f hours (subsampled)",
+            final_stats.num_samples,
+            final_stats.total_hours,
         )
         return
 
