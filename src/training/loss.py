@@ -1,0 +1,103 @@
+"""
+Dual loss for VADASR — BCE (gate) + CTC (decoder).
+
+Single Responsibility: Compute the combined loss with masking.
+CTC loss is zeroed out for noise-only samples where has_voice=False.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+
+class VADASRLoss(nn.Module):
+    """Combined VAD + ASR loss.
+
+    Parameters
+    ----------
+    lambda_vad : float
+        Weight for the VAD binary cross-entropy loss.
+    lambda_ctc : float
+        Weight for the CTC loss.
+    blank_id : int
+        CTC blank token index.
+    """
+
+    def __init__(
+        self,
+        lambda_vad: float = 1.0,
+        lambda_ctc: float = 1.0,
+        blank_id: int = 0,
+    ) -> None:
+        super().__init__()
+        self.lambda_vad = lambda_vad
+        self.lambda_ctc = lambda_ctc
+        self.bce_loss = nn.BCELoss()
+        self.ctc_loss = nn.CTCLoss(blank=blank_id, zero_infinity=True)
+
+    @classmethod
+    def from_config(cls, cfg: dict, blank_id: int) -> "VADASRLoss":
+        return cls(
+            lambda_vad=cfg.get("lambda_vad", 1.0),
+            lambda_ctc=cfg.get("lambda_ctc", 1.0),
+            blank_id=blank_id,
+        )
+
+    def forward(
+        self,
+        gate_prob: torch.Tensor,
+        ctc_log_probs: torch.Tensor,
+        ctc_lengths: torch.Tensor,
+        token_ids: torch.Tensor,
+        token_lengths: torch.Tensor,
+        has_voice: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Compute combined loss.
+
+        Parameters
+        ----------
+        gate_prob     : [B]         — predicted speech probability
+        ctc_log_probs : [B, T, V+1] — CTC log probabilities
+        ctc_lengths   : [B]         — valid CTC output lengths
+        token_ids     : [B, S]      — target token sequences
+        token_lengths : [B]         — target sequence lengths
+        has_voice     : [B]         — ground truth VAD labels (bool)
+
+        Returns
+        -------
+        dict with 'total', 'vad', 'ctc' loss tensors.
+        """
+        # --- VAD Loss (Binary Cross-Entropy) ---
+        vad_target = has_voice.float()
+        vad_loss = self.bce_loss(gate_prob, vad_target)
+
+        # --- CTC Loss (masked for noise samples) ---
+        voice_mask = has_voice
+        if voice_mask.any():
+            voice_indices = voice_mask.nonzero(as_tuple=True)[0]
+
+            # CTC expects [T, B, V+1]
+            ctc_input = ctc_log_probs[voice_indices].permute(1, 0, 2)
+            ctc_target = token_ids[voice_indices]
+            input_lengths = ctc_lengths[voice_indices]
+            target_lengths = token_lengths[voice_indices]
+
+            # Clamp lengths to valid range
+            input_lengths = input_lengths.clamp(min=1)
+            target_lengths = target_lengths.clamp(min=1)
+
+            ctc_loss = self.ctc_loss(
+                ctc_input, ctc_target,
+                input_lengths, target_lengths,
+            )
+        else:
+            ctc_loss = torch.tensor(0.0, device=gate_prob.device)
+
+        total = self.lambda_vad * vad_loss + self.lambda_ctc * ctc_loss
+
+        return {
+            "total": total,
+            "vad": vad_loss,
+            "ctc": ctc_loss,
+        }

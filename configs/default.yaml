@@ -1,0 +1,119 @@
+# ============================================================================
+# VADASR — Gated Early Exit Model Configuration
+# MarbleNet (VAD) + Conformer (ASR) with CTC Decoder
+# ============================================================================
+
+# --- Audio Feature Extraction ---
+features:
+  sample_rate: 16000
+  n_mels: 80
+  n_fft: 512
+  hop_length: 160
+  win_length: 400
+  fmin: 0.0
+  fmax: 8000.0
+  normalize: true
+
+# --- MarbleNet Encoder (VAD front-end) ---
+marblenet:
+  num_blocks: 3          # B in MarbleNet-BxRxC
+  num_sub_blocks: 2      # R
+  num_channels: 64       # C
+  kernel_sizes: [11, 13, 15]  # per-block kernel size
+  prologue_channels: 128
+  prologue_kernel: 11
+  epilogue_channels: [64, 128, 128]
+  epilogue_kernels: [29, 1, 1]
+  dropout: 0.1
+  input_channels: 80     # n_mels
+
+# --- VAD Gate ---
+gate:
+  hidden_dim: 128
+  threshold: 0.5         # inference-time decision boundary
+  temperature: 1.0       # sigmoid temperature scaling
+
+# --- Conformer Encoder (ASR back-end) ---
+conformer:
+  input_dim: 128         # must match marblenet epilogue output
+  num_heads: 4
+  ffn_dim: 256
+  num_layers: 4
+  depthwise_conv_kernel_size: 31
+  dropout: 0.1
+  encoder_dim: 256
+  subsampling_factor: 4
+
+# --- CTC Head ---
+ctc:
+  # vocab_size is set dynamically from tokenizer
+  blank_id: 0            # CTC blank token index
+
+# --- Tokenizer ---
+tokenizer:
+  type: "sentencepiece"
+  model_path: "data/bpe_4000/bpe.model"  # reuse existing BPE model
+  vocab_size: 4000
+
+# --- Dataset ---
+data:
+  bud500_name: "linhtran92/viet_bud500"
+  noise_manifest: "data/noise/manifest.jsonl"
+  noise_dir: "data/noise/audio"
+  speech_noise_ratio: 0.7   # 70% speech, 30% noise per epoch
+  max_audio_len_sec: 15.0
+  min_audio_len_sec: 0.5
+  num_workers: 4
+  pin_memory: true
+
+# --- Augmentation ---
+augmentation:
+  enabled: true
+  speed_perturb:
+    enabled: true
+    rates: [0.9, 0.95, 1.0, 1.05, 1.1]
+  spec_augment:
+    enabled: true
+    freq_masks: 2
+    freq_mask_width: 27
+    time_masks: 10
+    time_mask_width: 0.05   # fraction of total time
+  noise_mix:
+    enabled: true
+    snr_range: [5, 20]      # dB
+
+# --- Training ---
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  max_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  max_grad_norm: 5.0
+  use_amp: true
+  seed: 42
+
+  # Loss weights
+  lambda_vad: 1.0
+  lambda_ctc: 1.0
+
+  # Warmup + Cosine Annealing
+  warmup_steps: 1000
+  min_lr: 0.00001
+
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  save_every_n_epochs: 5
+  keep_top_k: 3            # keep top-K best checkpoints by val WER
+
+  # Early stopping
+  patience: 10
+  monitor_metric: "val_wer"
+  monitor_mode: "min"
+
+# --- Evaluation ---
+evaluation:
+  batch_size: 32
+  gate_threshold_search: true
+  threshold_range: [0.3, 0.7]
+  threshold_steps: 9
