@@ -89,11 +89,18 @@ Place your downloaded BUD500 dataset in the path specified by `data.bud500_local
 ```
 data/
 ├── bud500/
-│   ├── train/          # *.wav, *.flac, *.parquet, or *.jsonl
+│   ├── dataset_dict.json # (Optional) HuggingFace Arrow format metadata
+│   ├── train/            # *.arrow, *.parquet, *.jsonl, or *.wav
 │   └── test/
 └── bpe_4000/
-    └── bpe.model       # SentencePiece tokenizer
+    └── bpe.model         # SentencePiece tokenizer
 ```
+
+**Supported BUD500 Formats (Auto-detected in priority order):**
+1. **HuggingFace Arrow** (`.arrow` + `state.json` / `dataset_dict.json`) — The standard format produced by `datasets.save_to_disk()`.
+2. **HuggingFace Parquet** (`.parquet` files) — Typically found in the HF cache.
+3. **NeMo Manifests** (`.jsonl`) — Existing speech manifests.
+4. **Raw Audio** (`.wav` / `.flac` with sidecar `.txt` transcripts).
 
 #### 2b. Generate manifests (local BUD500 only)
 
@@ -102,10 +109,11 @@ python scripts/prepare_data.py --config configs/default.yaml
 ```
 
 This will:
-1. **Scan** your local BUD500 directory and create speech manifests (`speech_train.jsonl`, `speech_test.jsonl`)
-2. **Count** the speech samples and total hours
-3. **Generate synthetic noise** (white, pink, brown, babble, hum, fan) to match the speech volume in both sample count and total hours
-4. **Create** a balanced noise manifest (`noise.jsonl`)
+1. **Auto-detect** your local dataset format (e.g., loading Arrow datasets directly via `datasets.load_from_disk()`).
+2. **Scan** the data and create speech manifests (`speech_train.jsonl`, `speech_test.jsonl`). *(Note: If it detects leftover empty 0-sample manifests from previous failed runs, it will automatically delete and regenerate them).*
+3. **Count** the speech samples and total hours
+4. **Generate synthetic noise** (white, pink, brown, babble, hum, fan) to match the speech volume in both sample count and total hours
+5. **Create** a balanced noise manifest (`noise.jsonl`)
 
 #### 2c. (Optional) Download Freesound background noise
 

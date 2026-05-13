@@ -85,6 +85,7 @@ def main() -> None:
     parser.add_argument("--audio_path", type=str, default=None, help="Single audio file")
     parser.add_argument("--audio_dir", type=str, default=None, help="Directory of audio files")
     parser.add_argument("--threshold", type=float, default=None, help="Gate threshold override")
+    parser.add_argument("--reference", type=str, default=None, help="Ground truth text or JSON manifest for WER/CER calculation")
     args = parser.parse_args()
 
     if not args.audio_path and not args.audio_dir:
@@ -110,6 +111,18 @@ def main() -> None:
         model.vad_gate.threshold = args.threshold
 
     logger.info("Model loaded (epoch %d)", ckpt["epoch"])
+
+    # Load manifest if provided
+    manifest_texts = {}
+    if args.reference and args.reference.endswith(".json"):
+        import json
+        with open(args.reference, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip(): continue
+                item = json.loads(line)
+                basename = Path(item["audio_filepath"]).name
+                manifest_texts[basename] = item["text"]
+        logger.info("Loaded %d references from manifest", len(manifest_texts))
 
     # Collect audio files
     audio_files: list[Path] = []
@@ -159,8 +172,27 @@ def main() -> None:
             f"RTF={rtf:.3f}, dur={duration:.1f}s)"
         )
         if text:
-            print(f"  → {text}")
-        print()
+            print(f"  → Hypothesis: {text}")
+        
+        # Try to determine reference text
+        ref_text = None
+        if manifest_texts:
+            ref_text = manifest_texts.get(audio_path.name)
+        elif args.reference and len(audio_files) == 1 and not args.reference.endswith(".json"):
+            ref_text = args.reference
+        else:
+            txt_path = audio_path.with_suffix(".txt")
+            if txt_path.exists():
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    ref_text = f.read().strip()
+        
+        if ref_text is not None:
+            print(f"  → Reference : {ref_text}")
+            wer = calculate_wer(ref_text, text)
+            cer = calculate_cer(ref_text, text)
+            print(f"  → WER: {wer:.2%}, CER: {cer:.2%}")
+        elif text:
+            print() # add a newline if no reference was printed
 
     print("=" * 70)
     logger.info("Done.")
