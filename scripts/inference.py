@@ -140,6 +140,9 @@ def main() -> None:
 
     sample_rate = cfg["features"]["sample_rate"]
 
+    all_refs = []
+    all_hyps = []
+
     for audio_path in audio_files:
         waveform, wav_len = load_audio(audio_path, sample_rate)
         waveform = waveform.unsqueeze(0).to(device)  # [1, T]
@@ -191,10 +194,21 @@ def main() -> None:
             wer = calculate_wer(ref_text, text)
             cer = calculate_cer(ref_text, text)
             print(f"  → WER: {wer:.2%}, CER: {cer:.2%}")
+            
+            all_refs.append(ref_text)
+            all_hyps.append(text)
         elif text:
             print() # add a newline if no reference was printed
 
     print("=" * 70)
+
+    if all_refs:
+        avg_wer = jiwer.wer(all_refs, all_hyps)
+        avg_cer = jiwer.cer(all_refs, all_hyps)
+        print(f"Average WER: {avg_wer:.2%}")
+        print(f"Average CER: {avg_cer:.2%}")
+        print("=" * 70)
+
     logger.info("Done.")
 
 
