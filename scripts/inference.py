@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 import torchaudio
 import yaml
+import jiwer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -61,6 +62,20 @@ def ctc_greedy_decode(log_probs: torch.Tensor, length: int, tokenizer) -> str:
                 cleaned.append(tid)
         prev = tid
     return tokenizer.decode(cleaned) if cleaned else ""
+
+
+def calculate_wer(reference: str, hypothesis: str) -> float:
+    """Calculate Word Error Rate using jiwer."""
+    if not reference.strip():
+        return 0.0
+    return jiwer.wer(reference, hypothesis)
+
+
+def calculate_cer(reference: str, hypothesis: str) -> float:
+    """Calculate Character Error Rate using jiwer."""
+    if not reference.strip():
+        return 0.0
+    return jiwer.cer(reference, hypothesis)
 
 
 def main() -> None:
