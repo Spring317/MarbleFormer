@@ -6,6 +6,8 @@ Usage:
     python scripts/train.py --config configs/default.yaml
     python scripts/train.py --config configs/default.yaml --debug --max_samples 10 --max_epochs 50
     python scripts/train.py --config configs/default.yaml --resume checkpoints/best.pt
+    python scripts/train.py --config configs/default.yaml --nemo_weights path/to/conformer.nemo
+    python scripts/train.py --config configs/default.yaml --nemo_weights path/to/model.pth --freeze_conformer
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from src.models.vadasr_model import VADASRModel
 from src.training.loss import VADASRLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.training.trainer import Trainer
+from src.models.nemo_loader import load_nemo_weights
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +74,14 @@ def main() -> None:
     parser.add_argument(
         "--max_epochs", type=int, default=None,
         help="Override max epochs",
+    )
+    parser.add_argument(
+        "--nemo_weights", type=str, default=None,
+        help="Path to NeMo .nemo/.ckpt/.pth file for pretrained Conformer weights",
+    )
+    parser.add_argument(
+        "--freeze_conformer", action="store_true",
+        help="Freeze Conformer encoder (phase-1: only train MarbleNet + gate + CTC head)",
     )
     args = parser.parse_args()
 
@@ -178,6 +189,34 @@ def main() -> None:
 
     # ---- Loss ----
     criterion = VADASRLoss.from_config(train_cfg, blank_id=tokenizer.blank_id)
+
+    # ---- Load NeMo pretrained weights (optional) ----
+    if args.nemo_weights:
+        logger.info("Loading NeMo pretrained weights...")
+        nemo_diag = load_nemo_weights(
+            model,
+            args.nemo_weights,
+            load_conformer=True,
+            load_ctc_head=True,
+            freeze_loaded=args.freeze_conformer,
+            device=device,
+        )
+        arch = nemo_diag["nemo_arch"]
+        logger.info(
+            "NeMo model: %s (d_model=%d, n_layers=%d)",
+            arch["model_type"], arch["d_model"], arch["n_layers"],
+        )
+        logger.info(
+            "Loaded: %d conformer + %d ctc params, %d skipped",
+            nemo_diag["conformer_loaded"],
+            nemo_diag["ctc_loaded"],
+            len(nemo_diag["skipped"]),
+        )
+    elif args.freeze_conformer:
+        # Freeze without loading NeMo weights (e.g., resuming from own checkpoint)
+        logger.info("Freezing Conformer encoder (no NeMo weights)")
+        for param in model.conformer.parameters():
+            param.requires_grad = False
 
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(

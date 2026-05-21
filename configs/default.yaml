@@ -37,11 +37,11 @@ gate:
 conformer:
   input_dim: 128         # must match marblenet epilogue output
   num_heads: 4
-  ffn_dim: 256
-  num_layers: 4
+  ffn_dim: 704           # 176 * 4 (from NeMo ff_expansion_factor=4)
+  num_layers: 16         # Matches NeMo 13M Conformer
   depthwise_conv_kernel_size: 31
   dropout: 0.1
-  encoder_dim: 256
+  encoder_dim: 176       # Matches NeMo d_model=176
   subsampling_factor: 4
 
 # --- CTC Head ---
@@ -58,15 +58,15 @@ tokenizer:
 # --- Dataset ---
 data:
   # Local BUD500 dataset (already downloaded — no re-download)
-  bud500_local_dir: "data/bud500"        # root dir with train/ and test/ subdirs
+  bud500_local_dir: "/home/datasets/data/bud500"        # root dir with train/ and test/ subdirs
 
   # Background noise data
-  noise_dir: "data/background_noise"             # raw Freesound downloads (any format)
-  noise_resampled_dir: "data/background_noise_resampled"  # resampled 16kHz mono WAV
-  noise_manifest: "data/manifest/noise.jsonl"
+  noise_dir: "/home/datasets/background_noise"             # raw Freesound downloads (any format)
+  noise_resampled_dir: "/home/datasets/background_noise_resampled"  # resampled 16kHz mono WAV
+  noise_manifest: "/home/datasets/manifest/noise.jsonl"
 
   # Manifest output
-  manifest_dir: "data/manifest"
+  manifest_dir: "/home/datasets/data/manifest"
 
   speech_noise_ratio: 0.7   # 70% speech, 30% noise per epoch
   max_audio_len_sec: 15.0
@@ -124,4 +124,3 @@ evaluation:
   batch_size: 32
   gate_threshold_search: true
   threshold_range: [0.3, 0.7]
-  threshold_steps: 9

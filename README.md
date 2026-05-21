@@ -153,6 +153,8 @@ python scripts/prepare_data.py --config configs/default.yaml --force
 
 ### 3. Train
 
+#### Standard Training
+
 ```bash
 # Full training
 python scripts/train.py --config configs/default.yaml
@@ -162,6 +164,23 @@ python scripts/train.py --config configs/default.yaml \
     --debug --max_samples 10 --max_epochs 50
 
 # Resume from checkpoint
+python scripts/train.py --config configs/default.yaml \
+    --resume checkpoints/best.pt
+```
+
+#### Transfer Learning with NeMo Weights
+
+You can load pretrained weights from a NeMo `.nemo`, `.ckpt`, or `.pth` file. The loader uses shape-based matching to transfer weights into the VADASR architecture. 
+
+**CRITICAL:** The architecture specified in `configs/default.yaml` MUST exactly match the NeMo model (e.g. `encoder_dim`, `num_layers`, `ffn_dim`).
+
+```bash
+# Phase 1: Load NeMo weights, freeze Conformer, train only MarbleNet (VAD) + CTC
+python scripts/train.py --config configs/default.yaml \
+    --nemo_weights /path/to/nemo_weights.pth \
+    --freeze_conformer
+
+# Phase 2: Unfreeze Conformer, train end-to-end (resume from Phase 1)
 python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
 ```
