@@ -190,19 +190,23 @@ def _load_conformer_layers(
     nemo_prefix: str,
     num_target_layers: int,
 ) -> tuple[int, int, list[str]]:
-    """Load NeMo encoder layer weights into torchaudio Conformer layers.
+    """Load NeMo encoder layer weights into NeMo-compatible Conformer layers.
 
-    Both NeMo ConformerEncoder and torchaudio Conformer use the same
-    Conformer block structure (FFN1 → self-attn → conv → FFN2 → layernorms),
-    but with different key naming. This function maps them by matching
-    shapes within each corresponding layer index.
+    Since the target Conformer mirrors NeMo's architecture and naming,
+    this performs direct key mapping:
+
+        NeMo:   {encoder_prefix}layers.{i}.{sub_key}
+        Target: conformer_layers.{i}.{sub_key}
+
+    No shape-based guessing — keys are mapped by name, with shape
+    validation as a safety check.
 
     Parameters
     ----------
     nemo_state : dict
         Full NeMo state_dict.
     target_conformer : nn.Module
-        The torchaudio Conformer module (model.conformer.conformer).
+        The NeMoConformer module (model.conformer.conformer).
     nemo_prefix : str
         Key prefix for encoder params (e.g., "encoder.").
     num_target_layers : int
@@ -212,104 +216,64 @@ def _load_conformer_layers(
     -------
     (loaded_count, total_target_params, skipped_keys)
     """
+    target_state = target_conformer.state_dict()
+
     # Group NeMo params by layer index
     nemo_by_layer: dict[int, dict[str, torch.Tensor]] = {}
-    nemo_other: dict[str, torch.Tensor] = {}
+    layers_prefix = nemo_prefix + "layers."
 
     for key, val in nemo_state.items():
-        if not key.startswith(nemo_prefix):
+        if not key.startswith(layers_prefix):
             continue
-        relative = key[len(nemo_prefix):]
+        relative = key[len(layers_prefix):]
+        parts = relative.split(".", 1)
+        try:
+            layer_idx = int(parts[0])
+            sub_key = parts[1]
+            nemo_by_layer.setdefault(layer_idx, {})[sub_key] = val
+        except (IndexError, ValueError):
+            pass
 
-        if relative.startswith("layers."):
-            parts = relative.split(".", 2)
-            try:
-                layer_idx = int(parts[1])
-                sub_key = parts[2]
-                nemo_by_layer.setdefault(layer_idx, {})[sub_key] = val
-            except (IndexError, ValueError):
-                nemo_other[relative] = val
-        else:
-            nemo_other[relative] = val
-
-    # Group target params by layer index
-    target_state = target_conformer.state_dict()
-    target_by_layer: dict[int, dict[str, torch.Tensor]] = {}
-
-    for key, val in target_state.items():
-        if key.startswith("conformer_layers."):
-            parts = key.split(".", 2)
-            try:
-                layer_idx = int(parts[1])
-                sub_key = parts[2]
-                target_by_layer.setdefault(layer_idx, {})[sub_key] = val
-            except (IndexError, ValueError):
-                pass
-
-    # Determine how many layers to load
     n_nemo = len(nemo_by_layer)
-    n_target = len(target_by_layer)
-    n_load = min(n_nemo, n_target)
+    n_load = min(n_nemo, num_target_layers)
 
-    if n_nemo != n_target:
+    if n_nemo != num_target_layers:
         logger.warning(
             "Layer count mismatch: NeMo has %d layers, target has %d. "
-            "Loading first %d layers.", n_nemo, n_target, n_load,
+            "Loading first %d layers.", n_nemo, num_target_layers, n_load,
         )
 
-    # Match params within each layer by shape
     loaded_count = 0
     skipped_keys: list[str] = []
     updates: dict[str, torch.Tensor] = {}
 
     nemo_layer_indices = sorted(nemo_by_layer.keys())[:n_load]
-    target_layer_indices = sorted(target_by_layer.keys())[:n_load]
 
-    for i in range(n_load):
-        src_idx = nemo_layer_indices[i]
-        tgt_idx = target_layer_indices[i]
-
+    for i, src_idx in enumerate(nemo_layer_indices):
         src_params = nemo_by_layer[src_idx]
-        tgt_params = target_by_layer[tgt_idx]
 
-        # Build shape → ordered list of (key, tensor) for source
-        src_by_shape: dict[tuple[int, ...], list[tuple[str, torch.Tensor]]] = {}
-        for sk in sorted(src_params.keys()):
-            sv = src_params[sk]
-            shape = tuple(sv.shape)
-            src_by_shape.setdefault(shape, []).append((sk, sv))
+        for sub_key, nemo_val in sorted(src_params.items()):
+            target_key = f"conformer_layers.{i}.{sub_key}"
 
-        # Match each target param by finding a source param with the same shape
-        used_src: set[str] = set()
-        for tk in sorted(tgt_params.keys()):
-            tv = tgt_params[tk]
-            shape = tuple(tv.shape)
-
-            if shape not in src_by_shape:
+            if target_key not in target_state:
+                skipped_keys.append(
+                    f"nemo layer {src_idx}.{sub_key} (no matching target key)"
+                )
                 continue
 
-            # Find the first unused source param with this shape
-            matched = False
-            for sk, sv in src_by_shape[shape]:
-                if sk not in used_src:
-                    full_key = f"conformer_layers.{tgt_idx}.{tk}"
-                    updates[full_key] = sv
-                    used_src.add(sk)
-                    loaded_count += 1
-                    matched = True
-                    break
-
-            if not matched:
+            target_val = target_state[target_key]
+            if nemo_val.shape != target_val.shape:
                 skipped_keys.append(
-                    f"target layer {tgt_idx}.{tk} (shape {list(shape)})"
+                    f"nemo layer {src_idx}.{sub_key} "
+                    f"(shape mismatch: nemo {list(nemo_val.shape)} "
+                    f"vs target {list(target_val.shape)})"
                 )
+                continue
 
-        # Log unmatched source keys per layer
-        for sk in sorted(src_params.keys()):
-            if sk not in used_src:
-                skipped_keys.append(f"nemo layer {src_idx}.{sk}")
+            updates[target_key] = nemo_val
+            loaded_count += 1
 
-    # Apply the matched weights
+    # Apply all matched weights at once
     if updates:
         target_state.update(updates)
         target_conformer.load_state_dict(target_state, strict=False)

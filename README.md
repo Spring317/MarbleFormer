@@ -168,21 +168,64 @@ python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
 ```
 
-#### Transfer Learning with NeMo Weights
+#### Transfer Learning with NeMo Pretrained Conformer
 
-You can load pretrained weights from a NeMo `.nemo`, `.ckpt`, or `.pth` file. The loader uses shape-based matching to transfer weights into the VADASR architecture. 
+You can initialize the Conformer encoder (and optionally the CTC head) from an NVIDIA NeMo pretrained ASR model. The VADASR Conformer is architecturally identical to NeMo's — same relative positional multi-head attention, Macaron-style feed-forward, depthwise separable convolution — so **all weights load directly by name with zero skipped parameters**.
 
-**CRITICAL:** The architecture specified in `configs/default.yaml` MUST exactly match the NeMo model (e.g. `encoder_dim`, `num_layers`, `ffn_dim`).
+##### Supported NeMo Models
+
+| Model | `d_model` | `n_layers` | `n_heads` | `conv_kernel` | Config values |
+|-------|-----------|------------|-----------|---------------|---------------|
+| Conformer-CTC-BPE Small | 176 | 16 | 4 | 31 | `encoder_dim: 176, num_layers: 16, ffn_dim: 704` |
+| Conformer-CTC-BPE Medium | 256 | 16 | 4 | 31 | `encoder_dim: 256, num_layers: 16, ffn_dim: 1024` |
+| FastConformer-CTC-BPE | 512 | 18 | 8 | 9 | `encoder_dim: 512, num_layers: 18, ffn_dim: 2048` |
+
+> **Important:** The `conformer` section in `configs/default.yaml` **must** match the NeMo model's architecture. The default config ships with Conformer-Small values (`encoder_dim: 176`, `num_layers: 16`, `ffn_dim: 704`).
+
+##### Accepted File Formats
+
+- `.nemo` — NeMo archive (tar containing `model_weights.ckpt`)
+- `.ckpt` — PyTorch Lightning checkpoint
+- `.pth` / `.pt` — Raw PyTorch state dict
+
+##### Two-Phase Training
 
 ```bash
-# Phase 1: Load NeMo weights, freeze Conformer, train only MarbleNet (VAD) + CTC
+# Phase 1: Load NeMo weights, freeze Conformer, train MarbleNet + VAD gate + CTC head
 python scripts/train.py --config configs/default.yaml \
-    --nemo_weights /path/to/nemo_weights.pth \
+    --nemo_weights /path/to/stt_vi_conformer_ctc_small.nemo \
     --freeze_conformer
 
-# Phase 2: Unfreeze Conformer, train end-to-end (resume from Phase 1)
+# Phase 2: Unfreeze everything, fine-tune end-to-end (resume from Phase 1 best)
 python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
+```
+
+##### Single-Phase Training (no freeze)
+
+```bash
+python scripts/train.py --config configs/default.yaml \
+    --nemo_weights /path/to/stt_vi_conformer_ctc_small.nemo
+```
+
+##### Using a Different NeMo Model Size
+
+To use a different model (e.g., Medium), update `configs/default.yaml`:
+
+```yaml
+conformer:
+  encoder_dim: 256       # match NeMo d_model
+  num_layers: 16         # match NeMo n_layers
+  ffn_dim: 1024          # encoder_dim × 4
+  num_heads: 4           # match NeMo n_heads
+```
+
+Then train:
+
+```bash
+python scripts/train.py --config configs/default.yaml \
+    --nemo_weights /path/to/stt_vi_conformer_ctc_medium.nemo \
+    --freeze_conformer
 ```
 
 ### 4. Evaluate

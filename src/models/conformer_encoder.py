@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import torch
 import torch.nn as nn
-from torchaudio.models import Conformer
+from .nemo_conformer import NeMoConformer
 
 
 class _ConvSubsampling(nn.Module):
@@ -42,6 +42,9 @@ class _ConvSubsampling(nn.Module):
 class ConformerEncoder(nn.Module):
     """Conformer encoder with convolutional subsampling.
 
+    Uses a NeMo-compatible Conformer with relative positional attention,
+    enabling direct weight loading from NeMo pretrained models.
+
     Parameters
     ----------
     input_dim : int
@@ -65,10 +68,10 @@ class ConformerEncoder(nn.Module):
     def __init__(
         self,
         input_dim: int = 128,
-        encoder_dim: int = 256,
+        encoder_dim: int = 176,
         num_heads: int = 4,
-        ffn_dim: int = 256,
-        num_layers: int = 4,
+        ffn_dim: int = 704,
+        num_layers: int = 16,
         depthwise_conv_kernel_size: int = 31,
         dropout: float = 0.1,
         subsampling_factor: int = 4,
@@ -77,7 +80,7 @@ class ConformerEncoder(nn.Module):
         self.subsampling_factor = subsampling_factor
         self.encoder_dim = encoder_dim
         self.subsampling = _ConvSubsampling(input_dim, encoder_dim)
-        self.conformer = Conformer(
+        self.conformer = NeMoConformer(
             input_dim=encoder_dim,
             num_heads=num_heads,
             ffn_dim=ffn_dim,
