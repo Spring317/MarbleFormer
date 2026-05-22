@@ -253,7 +253,12 @@ def _load_conformer_layers(
         src_params = nemo_by_layer[src_idx]
 
         for sub_key, nemo_val in sorted(src_params.items()):
-            target_key = f"conformer_layers.{i}.{sub_key}"
+            # NeMo sometimes uses 'conv.' instead of 'conv_module.'
+            mapped_sub_key = sub_key
+            if mapped_sub_key.startswith("conv."):
+                mapped_sub_key = "conv_module." + mapped_sub_key[5:]
+
+            target_key = f"conformer_layers.{i}.{mapped_sub_key}"
 
             if target_key not in target_state:
                 skipped_keys.append(
@@ -439,11 +444,11 @@ def load_nemo_weights(
                 nemo_state=nemo_state,
                 target_conformer=model.conformer.conformer,
                 nemo_prefix=arch_info["encoder_prefix"],
-                num_target_layers=len([
-                    k for k in model.conformer.conformer.state_dict()
+                num_target_layers=len(set([
+                    k.split(".")[1] for k in model.conformer.conformer.state_dict()
                     if k.startswith("conformer_layers.")
                     and k.split(".")[1].isdigit()
-                ]),
+                ])),
             )
 
         diagnostics["conformer_loaded"] = conformer_loaded
