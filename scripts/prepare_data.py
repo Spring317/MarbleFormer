@@ -4,6 +4,8 @@ Prepare data manifests for VADASR training.
 
 - Scans a LOCAL BUD500 dataset directory (already downloaded)
 - Downloads & resamples Freesound background noise by category
+- Downloads & processes public audio datasets (FSD50K, ARCA23K, FSDnoisy18K, ESC-50)
+  as non-voice noise data: filters out human-activity classes, resamples to 16kHz
 - Generates JSONL manifests for speech and noise data
 
 Usage:
@@ -21,18 +23,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import fnmatch
 import json
 import logging
 import math
 import os
 import random
+import re
+import shutil
 import subprocess
 import sys
 import urllib.request
 import urllib.parse
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import soundfile as sf
 import yaml
@@ -81,6 +88,72 @@ FREESOUND_NOISE_CATEGORIES: list[str] = [
 ]
 
 TARGET_SAMPLE_RATE: int = 16000
+
+
+# ============================================================================
+# Public dataset configurations for non-voice noise
+# ============================================================================
+
+SUPPORTED_DATASETS: list[str] = ["fsd50k", "arca23k", "fsdnoisy18k", "esc50"]
+
+# Zenodo record IDs
+ZENODO_RECORDS: dict[str, int] = {
+    "fsd50k": 4060432,
+    "arca23k": 5117901,
+    "fsdnoisy18k": 2529934,
+}
+
+ESC50_ZIP_URL: str = "https://github.com/karoldvl/ESC-50/archive/master.zip"
+
+# --- Human-activity / voice classes to EXCLUDE from each dataset ---
+
+# ESC-50: targets 20-29 are "Human, non-speech sounds"
+ESC50_HUMAN_CATEGORIES: set[str] = {
+    "crying_baby", "sneezing", "clapping", "breathing", "coughing",
+    "footsteps", "laughing", "brushing_teeth", "snoring", "drinking_sipping",
+}
+
+# FSD50K: AudioSet ontology human-related labels (underscore-joined format)
+FSD50K_HUMAN_LABELS: set[str] = {
+    "Human_voice", "Speech", "Conversation", "Narration_and_monologue",
+    "Babbling", "Speech_synthesizer", "Shout", "Bellow", "Whoop",
+    "Yell", "Children_shouting", "Screaming", "Whispering",
+    "Male_speech_and_man_speaking", "Female_speech_and_woman_speaking",
+    "Child_speech_and_kid_speaking",
+    "Laughter", "Baby_laughter", "Giggle", "Snicker",
+    "Belly_laugh", "Chuckle_and_chortle",
+    "Crying_and_sobbing", "Baby_cry_and_infant_cry", "Whimper",
+    "Wail_and_moan", "Sigh",
+    "Singing", "Choir", "Yodeling", "Chant", "Mantra",
+    "Male_singing", "Female_singing", "Child_singing",
+    "Synthetic_singing", "Rapping", "Humming",
+    "Groan", "Grunt", "Whistling",
+    "Breathing", "Wheeze", "Snoring", "Gasp", "Pant", "Snort",
+    "Cough", "Throat_clearing", "Sneeze", "Sniff",
+    "Run", "Shuffle", "Walk_and_footsteps",
+    "Chewing_and_mastication", "Biting", "Gargling",
+    "Stomach_rumble", "Burping_and_eructation", "Hiccup", "Fart",
+    "Hands", "Finger_snapping", "Clapping",
+    "Heart_sounds_and_heartbeat", "Heart_murmur",
+    "Respiratory_sounds", "Human_group_actions",
+    "Cheering", "Shouting", "Children_playing",
+    "Human_sounds", "Human_locomotion",
+}
+
+# ARCA23K: human sound classes (original label format)
+ARCA23K_HUMAN_CLASSES: set[str] = {
+    "Burping, eructation", "Chewing, mastication",
+    "Child speech, kid speaking", "Clapping", "Cough",
+    "Crying, sobbing", "Fart", "Female singing",
+    "Female speech, woman speaking", "Finger snapping",
+    "Giggle", "Male speech, man speaking", "Run",
+    "Screaming", "Walk, footsteps",
+}
+
+# FSDnoisy18K: human-related classes
+FSDNOISY18K_HUMAN_CLASSES: set[str] = {
+    "Clapping", "Fart", "Walk, footsteps",
+}
 
 
 # ============================================================================
@@ -771,6 +844,570 @@ def prepare_noise_manifest(
 
 
 # ============================================================================
+# 3b. Public dataset download & filter (FSD50K, ARCA23K, FSDnoisy18K, ESC-50)
+# ============================================================================
+
+def _zenodo_get_file_urls(record_id: int) -> dict[str, str]:
+    """Query Zenodo API for download URLs of a record's files.
+
+    Returns dict mapping filename -> download URL.
+    """
+    api_url = f"https://zenodo.org/api/records/{record_id}"
+    logger.info("  Querying Zenodo API: %s", api_url)
+    try:
+        req = urllib.request.Request(api_url)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        logger.error("  Failed to query Zenodo API for record %d: %s",
+                     record_id, e)
+        return {}
+
+    files = data.get("files", [])
+    result: dict[str, str] = {}
+    for f in files:
+        key = f.get("key", "")
+        link = f.get("links", {}).get("self", "")
+        if key and link:
+            # Zenodo API links end with /content for download
+            if not link.endswith("/content"):
+                link = link + "/content"
+            result[key] = link
+    logger.info("  Found %d files for record %d", len(result), record_id)
+    return result
+
+
+def _download_file(url: str, dest: Path, desc: str = "") -> bool:
+    """Download a file with progress logging. Skips if dest already exists."""
+    if dest.exists():
+        logger.info("    Already downloaded: %s", dest.name)
+        return True
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest.with_suffix(dest.suffix + ".tmp")
+    label = desc or dest.name
+    logger.info("    Downloading %s ...", label)
+
+    try:
+        urllib.request.urlretrieve(url, str(tmp_path))
+        tmp_path.rename(dest)
+        size_mb = dest.stat().st_size / (1024 * 1024)
+        logger.info("    ✓ Downloaded %s (%.1f MB)", dest.name, size_mb)
+        return True
+    except Exception as e:
+        logger.error("    ✗ Download failed for %s: %s", label, e)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return False
+
+
+def _merge_split_zip(zip_parts: list[Path], final_zip: Path,
+                     extract_dir: Path) -> bool:
+    """Merge split zip archives (.z01, .z02, ... .zip) and extract.
+
+    Uses ``zip -s 0`` to merge, then ``unzip`` to extract.
+    Falls back to manual concatenation if zip CLI is unavailable.
+    """
+    if extract_dir.exists() and any(extract_dir.rglob("*.wav")):
+        logger.info("    Already extracted: %s", extract_dir)
+        return True
+
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    merged = final_zip.parent / (final_zip.stem + "_merged.zip")
+
+    if not merged.exists():
+        # Try zip -s 0 (standard way to merge split archives)
+        try:
+            subprocess.run(
+                ["zip", "-s", "0", str(final_zip), "--out", str(merged)],
+                capture_output=True, check=True, timeout=600,
+            )
+            logger.info("    Merged split archive → %s", merged.name)
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            logger.warning("    zip merge failed (%s), trying cat fallback", e)
+            # Fallback: cat .z01 .z02 ... .zip > merged.zip
+            sorted_parts = sorted(
+                [p for p in zip_parts if p.suffix != ".zip"],
+                key=lambda p: p.suffix,
+            )
+            sorted_parts.append(final_zip)  # .zip goes last
+            with open(merged, "wb") as out:
+                for part in sorted_parts:
+                    with open(part, "rb") as inp:
+                        shutil.copyfileobj(inp, out)
+            logger.info("    Concatenated %d parts → %s",
+                        len(sorted_parts), merged.name)
+
+    # Extract
+    try:
+        subprocess.run(
+            ["unzip", "-o", "-q", str(merged), "-d", str(extract_dir)],
+            capture_output=True, check=True, timeout=1800,
+        )
+        logger.info("    ✓ Extracted to %s", extract_dir)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # Fallback to Python zipfile
+        try:
+            with zipfile.ZipFile(str(merged), "r") as zf:
+                zf.extractall(str(extract_dir))
+            logger.info("    ✓ Extracted (Python) to %s", extract_dir)
+            return True
+        except Exception as e2:
+            logger.error("    ✗ Extraction failed: %s", e2)
+            return False
+
+
+def _extract_simple_zip(zip_path: Path, extract_dir: Path) -> bool:
+    """Extract a single (non-split) zip archive."""
+    if extract_dir.exists() and any(extract_dir.iterdir()):
+        logger.info("    Already extracted: %s", extract_dir)
+        return True
+
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            zf.extractall(str(extract_dir))
+        logger.info("    ✓ Extracted %s", zip_path.name)
+        return True
+    except Exception as e:
+        logger.error("    ✗ Extraction failed for %s: %s", zip_path.name, e)
+        return False
+
+
+def _resample_single_file(src: Path, dst: Path,
+                          target_sr: int = TARGET_SAMPLE_RATE) -> bool:
+    """Resample a single audio file to target_sr mono WAV."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return True
+    try:
+        if _check_sox_available():
+            _resample_with_sox(src, dst, target_sr)
+        else:
+            _resample_with_python(src, dst, target_sr)
+        return True
+    except Exception as e:
+        logger.debug("    Resample failed %s: %s", src.name, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset download + filter
+# ---------------------------------------------------------------------------
+
+def download_and_filter_esc50(
+    download_dir: Path,
+    output_dir: Path,
+) -> int:
+    """Download ESC-50 from GitHub, filter out human categories, resample.
+
+    Returns number of non-human clips saved.
+    """
+    logger.info("=== ESC-50 ===")
+    zip_path = download_dir / "ESC-50-master.zip"
+
+    # Download
+    if not _download_file(ESC50_ZIP_URL, zip_path, "ESC-50 dataset"):
+        return 0
+
+    # Extract
+    extract_dir = download_dir / "ESC-50-master"
+    if not _extract_simple_zip(zip_path, extract_dir):
+        return 0
+
+    # Find the actual repo root (may be nested)
+    meta_csv = None
+    for candidate in [
+        extract_dir / "meta" / "esc50.csv",
+        extract_dir / "ESC-50-master" / "meta" / "esc50.csv",
+    ]:
+        if candidate.exists():
+            meta_csv = candidate
+            break
+    if meta_csv is None:
+        logger.error("  Could not find meta/esc50.csv in ESC-50 archive")
+        return 0
+
+    audio_root = meta_csv.parent.parent / "audio"
+    if not audio_root.exists():
+        logger.error("  Could not find audio/ directory in ESC-50 archive")
+        return 0
+
+    # Parse CSV and filter
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    skipped = 0
+    with open(meta_csv, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            category = row.get("category", "")
+            filename = row.get("filename", "")
+            if category in ESC50_HUMAN_CATEGORIES:
+                skipped += 1
+                continue
+
+            src = audio_root / filename
+            if not src.exists():
+                continue
+
+            dst = output_dir / f"esc50_{filename}"
+            if _resample_single_file(src, dst):
+                count += 1
+
+    logger.info("  ESC-50: kept %d clips, filtered %d human-activity clips",
+                count, skipped)
+    return count
+
+
+def download_and_filter_fsdnoisy18k(
+    download_dir: Path,
+    output_dir: Path,
+) -> int:
+    """Download FSDnoisy18K from Zenodo, filter human classes, resample."""
+    logger.info("=== FSDnoisy18K ===")
+    record_id = ZENODO_RECORDS["fsdnoisy18k"]
+    file_urls = _zenodo_get_file_urls(record_id)
+    if not file_urls:
+        return 0
+
+    # Download audio_train.zip and audio_test.zip
+    target_zips = {}
+    for fname, url in file_urls.items():
+        fname_lower = fname.lower()
+        if "audio_train" in fname_lower and fname_lower.endswith(".zip"):
+            target_zips["train"] = (fname, url)
+        elif "audio_test" in fname_lower and fname_lower.endswith(".zip"):
+            target_zips["test"] = (fname, url)
+
+    # Also download metadata
+    meta_files = {}
+    for fname, url in file_urls.items():
+        fname_lower = fname.lower()
+        if fname_lower.endswith(".csv") or "meta" in fname_lower:
+            if "train.csv" in fname_lower:
+                meta_files["train"] = (fname, url)
+            elif "test.csv" in fname_lower:
+                meta_files["test"] = (fname, url)
+        if fname_lower.endswith(".zip") and "meta" in fname_lower:
+            meta_files["meta_zip"] = (fname, url)
+
+    for split, (fname, url) in target_zips.items():
+        _download_file(url, download_dir / fname, f"FSDnoisy18K {split}")
+
+    # Download meta zip if available
+    for key, (fname, url) in meta_files.items():
+        _download_file(url, download_dir / fname, f"FSDnoisy18K {key}")
+
+    # Extract audio zips
+    extract_dir = download_dir / "fsdnoisy18k_extracted"
+    for split, (fname, _) in target_zips.items():
+        _extract_simple_zip(download_dir / fname, extract_dir)
+
+    # Extract meta zip if present
+    if "meta_zip" in meta_files:
+        fname = meta_files["meta_zip"][0]
+        _extract_simple_zip(download_dir / fname, extract_dir)
+
+    # Find CSV files for labels
+    train_csv = _find_file_recursive(extract_dir, "train.csv")
+    test_csv = _find_file_recursive(extract_dir, "test.csv")
+
+    # Build label lookup from CSV
+    human_fnames: set[str] = set()
+    for csv_path in [train_csv, test_csv]:
+        if csv_path is None:
+            continue
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    label = row.get("label", "")
+                    fname = row.get("fname", "")
+                    if label in FSDNOISY18K_HUMAN_CLASSES:
+                        human_fnames.add(fname)
+        except Exception as e:
+            logger.warning("  Could not parse %s: %s", csv_path, e)
+
+    # Copy non-human audio files with resampling
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    skipped = 0
+    audio_extensions = {".wav", ".flac", ".ogg", ".mp3"}
+    for audio_file in sorted(extract_dir.rglob("*")):
+        if audio_file.suffix.lower() not in audio_extensions:
+            continue
+        if audio_file.name in human_fnames:
+            skipped += 1
+            continue
+        dst = output_dir / f"fsdnoisy18k_{audio_file.name}"
+        if dst.suffix.lower() != ".wav":
+            dst = dst.with_suffix(".wav")
+        if _resample_single_file(audio_file, dst):
+            count += 1
+
+    logger.info("  FSDnoisy18K: kept %d clips, filtered %d human clips",
+                count, skipped)
+    return count
+
+
+def download_and_filter_fsd50k(
+    download_dir: Path,
+    output_dir: Path,
+) -> int:
+    """Download FSD50K from Zenodo, filter human classes, resample.
+
+    FSD50K has split zip archives for dev and eval audio.
+    Ground truth CSVs (dev.csv, eval.csv) contain multi-labels.
+    """
+    logger.info("=== FSD50K ===")
+    record_id = ZENODO_RECORDS["fsd50k"]
+    file_urls = _zenodo_get_file_urls(record_id)
+    if not file_urls:
+        return 0
+
+    # Categorize files
+    dev_audio_parts: dict[str, str] = {}
+    eval_audio_parts: dict[str, str] = {}
+    ground_truth_zip: tuple[str, str] | None = None
+
+    for fname, url in file_urls.items():
+        fl = fname.lower()
+        if "dev_audio" in fl:
+            dev_audio_parts[fname] = url
+        elif "eval_audio" in fl:
+            eval_audio_parts[fname] = url
+        elif "ground_truth" in fl:
+            ground_truth_zip = (fname, url)
+
+    # Download ground truth first
+    if ground_truth_zip:
+        _download_file(ground_truth_zip[1],
+                       download_dir / ground_truth_zip[0],
+                       "FSD50K ground truth")
+        _extract_simple_zip(
+            download_dir / ground_truth_zip[0],
+            download_dir / "fsd50k_gt",
+        )
+
+    # Download dev and eval audio parts
+    for fname, url in sorted(dev_audio_parts.items()):
+        _download_file(url, download_dir / fname, f"FSD50K {fname}")
+
+    for fname, url in sorted(eval_audio_parts.items()):
+        _download_file(url, download_dir / fname, f"FSD50K {fname}")
+
+    # Merge & extract dev audio (split zip)
+    extract_dir = download_dir / "fsd50k_extracted"
+    if dev_audio_parts:
+        dev_parts = [download_dir / f for f in sorted(dev_audio_parts.keys())]
+        dev_final = [p for p in dev_parts if p.suffix == ".zip"]
+        if dev_final:
+            _merge_split_zip(dev_parts, dev_final[0], extract_dir)
+
+    # Merge & extract eval audio
+    if eval_audio_parts:
+        eval_parts = [download_dir / f
+                      for f in sorted(eval_audio_parts.keys())]
+        eval_final = [p for p in eval_parts if p.suffix == ".zip"]
+        if eval_final:
+            _merge_split_zip(eval_parts, eval_final[0], extract_dir)
+
+    # Parse ground truth to find human-labeled files
+    human_fnames: set[str] = set()
+    gt_dir = download_dir / "fsd50k_gt"
+    for csv_name in ["dev.csv", "eval.csv"]:
+        csv_path = _find_file_recursive(gt_dir, csv_name)
+        if csv_path is None:
+            continue
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    labels_str = row.get("labels", "")
+                    fname = row.get("fname", "")
+                    labels = set(labels_str.split(","))
+                    if labels & FSD50K_HUMAN_LABELS:
+                        human_fnames.add(fname)
+        except Exception as e:
+            logger.warning("  Could not parse %s: %s", csv_path, e)
+
+    logger.info("  FSD50K: %d files flagged as human-activity", len(human_fnames))
+
+    # Copy non-human files with resampling
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    skipped = 0
+    audio_extensions = {".wav", ".flac", ".ogg", ".mp3"}
+    for audio_file in sorted(extract_dir.rglob("*")):
+        if audio_file.suffix.lower() not in audio_extensions:
+            continue
+        # fname in CSV is without extension
+        stem = audio_file.stem
+        if stem in human_fnames:
+            skipped += 1
+            continue
+        dst = output_dir / f"fsd50k_{audio_file.name}"
+        if dst.suffix.lower() != ".wav":
+            dst = dst.with_suffix(".wav")
+        if _resample_single_file(audio_file, dst):
+            count += 1
+
+    logger.info("  FSD50K: kept %d clips, filtered %d human clips",
+                count, skipped)
+    return count
+
+
+def download_and_filter_arca23k(
+    download_dir: Path,
+    output_dir: Path,
+) -> int:
+    """Download ARCA23K from Zenodo, filter human classes, resample.
+
+    ARCA23K uses split archives (.z01 through .z04 + .zip).
+    """
+    logger.info("=== ARCA23K ===")
+    record_id = ZENODO_RECORDS["arca23k"]
+    file_urls = _zenodo_get_file_urls(record_id)
+    if not file_urls:
+        return 0
+
+    # Download all files
+    audio_parts: dict[str, str] = {}
+    gt_files: dict[str, str] = {}
+    for fname, url in file_urls.items():
+        _download_file(url, download_dir / fname, f"ARCA23K {fname}")
+        fl = fname.lower()
+        if fl.endswith((".z01", ".z02", ".z03", ".z04", ".zip")):
+            if "ground_truth" not in fl and "metadata" not in fl:
+                audio_parts[fname] = url
+        if "ground_truth" in fl:
+            gt_files[fname] = url
+
+    # Extract ground truth
+    gt_dir = download_dir / "arca23k_gt"
+    for fname in gt_files:
+        _extract_simple_zip(download_dir / fname, gt_dir)
+
+    # Merge & extract audio
+    extract_dir = download_dir / "arca23k_extracted"
+    if audio_parts:
+        parts = [download_dir / f for f in sorted(audio_parts.keys())]
+        final_zip = [p for p in parts if p.suffix == ".zip"]
+        if final_zip:
+            _merge_split_zip(parts, final_zip[0], extract_dir)
+
+    # Parse ground truth CSV to find human-labeled files
+    human_fnames: set[str] = set()
+    for csv_name in ["train.csv", "val.csv", "test.csv"]:
+        csv_path = _find_file_recursive(gt_dir, csv_name)
+        if csv_path is None:
+            continue
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    label = row.get("label", row.get("category", ""))
+                    fname = row.get("fname", row.get("filename", ""))
+                    if label in ARCA23K_HUMAN_CLASSES:
+                        human_fnames.add(fname)
+        except Exception as e:
+            logger.warning("  Could not parse %s: %s", csv_path, e)
+
+    # Copy non-human files with resampling
+    output_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    skipped = 0
+    audio_extensions = {".wav", ".flac", ".ogg", ".mp3"}
+    for audio_file in sorted(extract_dir.rglob("*")):
+        if audio_file.suffix.lower() not in audio_extensions:
+            continue
+        stem = audio_file.stem
+        if stem in human_fnames or audio_file.name in human_fnames:
+            skipped += 1
+            continue
+        dst = output_dir / f"arca23k_{audio_file.name}"
+        if dst.suffix.lower() != ".wav":
+            dst = dst.with_suffix(".wav")
+        if _resample_single_file(audio_file, dst):
+            count += 1
+
+    logger.info("  ARCA23K: kept %d clips, filtered %d human clips",
+                count, skipped)
+    return count
+
+
+def _find_file_recursive(root: Path, name: str) -> Path | None:
+    """Recursively find a file by name under root."""
+    if not root.exists():
+        return None
+    for p in root.rglob(name):
+        return p
+    return None
+
+
+# --- Orchestrator ---
+
+_DATASET_DOWNLOADERS = {
+    "esc50": download_and_filter_esc50,
+    "fsdnoisy18k": download_and_filter_fsdnoisy18k,
+    "fsd50k": download_and_filter_fsd50k,
+    "arca23k": download_and_filter_arca23k,
+}
+
+
+def download_public_datasets(
+    download_dir: Path,
+    output_dir: Path,
+    datasets: list[str] | None = None,
+    cleanup_raw: bool = False,
+) -> int:
+    """Download, filter (remove human-activity), and resample public datasets.
+
+    Parameters
+    ----------
+    download_dir : Path
+        Directory for raw downloads and temporary extraction.
+    output_dir : Path
+        Directory to write filtered, resampled 16kHz mono WAV files.
+    datasets : list[str] | None
+        Which datasets to download. Defaults to all SUPPORTED_DATASETS.
+    cleanup_raw : bool
+        If True, delete the raw downloads and extracted dirs after processing.
+
+    Returns
+    -------
+    int — total number of non-voice clips saved.
+    """
+    if datasets is None:
+        datasets = SUPPORTED_DATASETS
+
+    total = 0
+    for ds_name in datasets:
+        ds_lower = ds_name.lower()
+        if ds_lower not in _DATASET_DOWNLOADERS:
+            logger.warning("Unknown dataset: %s (supported: %s)",
+                           ds_name, SUPPORTED_DATASETS)
+            continue
+
+        ds_download_dir = download_dir / ds_lower
+        ds_download_dir.mkdir(parents=True, exist_ok=True)
+
+        downloader = _DATASET_DOWNLOADERS[ds_lower]
+        n = downloader(ds_download_dir, output_dir)
+        total += n
+
+    logger.info("Public datasets: %d total non-voice clips saved to %s",
+                total, output_dir)
+
+    if cleanup_raw and download_dir.exists():
+        logger.info("Cleaning up raw downloads: %s", download_dir)
+        shutil.rmtree(download_dir, ignore_errors=True)
+
+    return total
+
+
+# ============================================================================
 # 4. Manifest statistics & balancing
 # ============================================================================
 
@@ -1200,6 +1837,13 @@ Examples:
   python scripts/prepare_data.py --config configs/default.yaml \\
       --download_freesound --freesound_api_key YOUR_KEY
 
+  # Download public datasets (FSD50K, ARCA23K, FSDnoisy18K, ESC-50) as noise
+  python scripts/prepare_data.py --config configs/default.yaml --download_datasets
+
+  # Download only specific datasets
+  python scripts/prepare_data.py --config configs/default.yaml \\
+      --download_datasets --datasets esc50 fsdnoisy18k
+
   # Quick test with 1000 speech samples
   python scripts/prepare_data.py --config configs/default.yaml --max_samples 1000
         """,
@@ -1238,6 +1882,23 @@ Examples:
         "--skip_resample", action="store_true",
         help="Skip the resampling step (if data is already 16kHz WAV)",
     )
+    # --- Public dataset download ---
+    parser.add_argument(
+        "--download_datasets", action="store_true",
+        help="Download public audio datasets (FSD50K, ARCA23K, FSDnoisy18K, "
+             "ESC-50), filter out human-activity classes, resample to 16kHz, "
+             "and add to noise manifest",
+    )
+    parser.add_argument(
+        "--datasets", nargs="+", default=None,
+        help="Which public datasets to download (default: all). "
+             f"Choices: {SUPPORTED_DATASETS}",
+    )
+    parser.add_argument(
+        "--cleanup_raw", action="store_true",
+        help="Delete the raw downloaded zip files and extracted temporary "
+             "directories after processing to save disk space",
+    )
     # --- Force regeneration ---
     parser.add_argument(
         "--force", action="store_true",
@@ -1263,6 +1924,12 @@ Examples:
     ))
     resampled_noise_dir = Path(data_cfg.get(
         "noise_resampled_dir", "data/background_noise_resampled"
+    ))
+    public_ds_download = Path(data_cfg.get(
+        "public_datasets_download_dir", "data/public_datasets_raw"
+    ))
+    public_ds_output = Path(data_cfg.get(
+        "public_datasets_noise_dir", "data/public_datasets_noise"
     ))
     out_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
     noise_manifest = Path(data_cfg.get(
@@ -1342,11 +2009,32 @@ Examples:
             background_data_root = freesound_raw_dir
 
     # ================================================================
+    # Step 2b: Download public datasets as noise (optional)
+    # ================================================================
+    if args.download_datasets:
+        print("\n" + "=" * 60)
+        print("STEP 2b: Download public datasets "
+              "(FSD50K, ARCA23K, FSDnoisy18K, ESC-50)")
+        print("=" * 60)
+
+        download_public_datasets(
+            download_dir=public_ds_download,
+            output_dir=public_ds_output,
+            datasets=args.datasets,
+            cleanup_raw=args.cleanup_raw,
+        )
+
+    # ================================================================
     # Step 3: Noise manifest (from existing downloads)
     # ================================================================
     print("\n" + "=" * 60)
     print("STEP 3: Prepare noise manifest")
     print("=" * 60)
+
+    # Start with an empty or existing manifest
+    noise_manifest.parent.mkdir(parents=True, exist_ok=True)
+    if args.force and noise_manifest.exists():
+        noise_manifest.unlink()
 
     if background_data_root.exists():
         # If resampled dir exists, prefer it
@@ -1357,14 +2045,41 @@ Examples:
         else:
             prepare_noise_manifest(background_data_root, noise_manifest)
     else:
-        # Create an empty noise manifest so balancing can append to it
-        noise_manifest.parent.mkdir(parents=True, exist_ok=True)
         if not noise_manifest.exists():
             noise_manifest.touch()
         logger.warning(
             "No downloaded noise found at %s — will generate synthetic noise.",
             background_data_root,
         )
+
+    # Also include public dataset noise if available
+    if public_ds_output.exists() and any(public_ds_output.rglob("*.wav")):
+        public_noise_manifest = out_dir / "noise_public_datasets.jsonl"
+        if args.force and public_noise_manifest.exists():
+            public_noise_manifest.unlink()
+        prepare_noise_manifest(public_ds_output, public_noise_manifest)
+
+        # Append public dataset entries to the main noise manifest
+        if public_noise_manifest.exists():
+            appended = 0
+            existing_paths: set[str] = set()
+            if noise_manifest.exists():
+                with open(noise_manifest, "r", encoding="utf-8") as f:
+                    for line in f:
+                        entry = json.loads(line.strip())
+                        existing_paths.add(entry.get("audio_filepath", ""))
+
+            with open(noise_manifest, "a", encoding="utf-8") as out_f:
+                with open(public_noise_manifest, "r", encoding="utf-8") as in_f:
+                    for line in in_f:
+                        entry = json.loads(line.strip())
+                        if entry.get("audio_filepath", "") not in existing_paths:
+                            out_f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                            appended += 1
+            logger.info(
+                "Appended %d public dataset entries to noise manifest",
+                appended,
+            )
 
     # ================================================================
     # Step 4: Count speech stats & balance noise to match
@@ -1422,3 +2137,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

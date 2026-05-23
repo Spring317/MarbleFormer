@@ -37,17 +37,18 @@ gate:
 conformer:
   input_dim: 128         # must match marblenet epilogue output
   num_heads: 4
-  ffn_dim: 704           # 176 * 4 (NeMo ff_expansion_factor=4)
-  num_layers: 16         # matches NeMo Conformer-Small (13M)
+  ffn_dim: 704           # 176 * 4 (from NeMo ff_expansion_factor=4)
+  num_layers: 16         # Matches NeMo 13M Conformer
   depthwise_conv_kernel_size: 31
   dropout: 0.1
-  encoder_dim: 176       # matches NeMo d_model=176
+  encoder_dim: 176       # Matches NeMo d_model=176
   subsampling_factor: 4
 
 # --- CTC Head ---
 ctc:
   # vocab_size is set dynamically from tokenizer
   blank_id: 0            # CTC blank token index
+  add_blank: true
 
 # --- Tokenizer ---
 tokenizer:
@@ -64,6 +65,8 @@ data:
   noise_dir: "/home/datasets/background_noise"             # raw Freesound downloads (any format)
   noise_resampled_dir: "/home/datasets/background_noise_resampled"  # resampled 16kHz mono WAV
   noise_manifest: "/home/datasets/manifest/noise.jsonl"
+  public_datasets_download_dir: "/home/datasets/public_datasets_raw"
+  public_datasets_noise_dir: "/home/datasets/public_datasets_noise"
 
   # Manifest output
   manifest_dir: "/home/datasets/data/manifest"
@@ -105,6 +108,9 @@ training:
   lambda_vad: 1.0
   lambda_ctc: 1.0
 
+  # CTC reduction (match NeMo)
+  ctc_reduction: "mean_batch"
+
   # Warmup + Cosine Annealing
   warmup_steps: 1000
   min_lr: 0.00001
@@ -124,3 +130,4 @@ evaluation:
   batch_size: 32
   gate_threshold_search: true
   threshold_range: [0.3, 0.7]
+

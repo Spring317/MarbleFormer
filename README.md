@@ -18,73 +18,73 @@ Audio (16kHz) → 80-band Log-Mel → MarbleNet Encoder (300K params)
                         │                               │
                    Return ""                    Conformer Encoder (5.6M)
                  early exit                         │
-                                                 CTC Head (1M)
+                                                 ctc head (1m)
                                                         │
-                                                   Transcript
+                                                   transcript
 ```
 
-**Total: ~7M parameters**
+**total: ~7m parameters**
 
-### Key Design Decisions
+### key design decisions
 
-- **Dual-headed labels**: Each sample has `{"text": str, "has_voice": bool}` — the gate receives direct BCE supervision instead of learning from CTC blank ambiguity
-- **Training**: Both branches always execute (for gradient flow). Loss = `λ_vad * BCE + λ_ctc * CTC` (CTC is masked to 0 for noise samples)
-- **Inference**: Gate makes a hard decision. Non-speech samples skip Conformer entirely
-- **Balanced data**: Noise dataset is automatically generated/augmented to match the speech dataset in both sample count and total hours
+- **dual-headed labels**: each sample has `{"text": str, "has_voice": bool}` — the gate receives direct bce supervision instead of learning from ctc blank ambiguity
+- **training**: both branches always execute (for gradient flow). loss = `λ_vad * bce + λ_ctc * ctc` (ctc is masked to 0 for noise samples)
+- **inference**: gate makes a hard decision. non-speech samples skip conformer entirely
+- **balanced data**: noise dataset is automatically generated/augmented to match the speech dataset in both sample count and total hours
 
-## Project Structure (SOLID)
+## project structure (solid)
 
 ```
 vadasr/
 ├── configs/
-│   └── default.yaml              # All hyperparameters
+│   └── default.yaml              # all hyperparameters
 ├── src/
 │   ├── features/
-│   │   └── mel_extractor.py      # Log-mel spectrogram with CMVN
+│   │   └── mel_extractor.py      # log-mel spectrogram with cmvn
 │   ├── models/
-│   │   ├── marblenet_encoder.py  # 1D depthwise separable conv blocks (3×2×64)
-│   │   ├── conformer_encoder.py  # Conformer + 4× conv subsampling
-│   │   ├── vad_gate.py           # Binary gate (pooling → MLP → sigmoid)
-│   │   ├── ctc_head.py           # Linear → LogSoftmax projection
-│   │   └── vadasr_model.py       # Composed model with dependency injection
+│   │   ├── marblenet_encoder.py  # 1d depthwise separable conv blocks (3×2×64)
+│   │   ├── conformer_encoder.py  # conformer + 4× conv subsampling
+│   │   ├── vad_gate.py           # binary gate (pooling → mlp → sigmoid)
+│   │   ├── ctc_head.py           # linear → logsoftmax projection
+│   │   └── vadasr_model.py       # composed model with dependency injection
 │   ├── data/
-│   │   ├── dataset.py            # Unified speech + noise dataset
-│   │   ├── collator.py           # Variable-length batch padding
-│   │   └── augmentation.py       # Pluggable speed perturb / noise / masking
+│   │   ├── dataset.py            # unified speech + noise dataset
+│   │   ├── collator.py           # variable-length batch padding
+│   │   └── augmentation.py       # pluggable speed perturb / noise / masking
 │   ├── training/
-│   │   ├── loss.py               # Dual BCE (gate) + masked CTC (decoder)
-│   │   ├── trainer.py            # AMP, grad accum, checkpointing, early stopping
-│   │   └── scheduler.py          # Warmup + cosine annealing
+│   │   ├── loss.py               # dual bce (gate) + masked ctc (decoder)
+│   │   ├── trainer.py            # amp, grad accum, checkpointing, early stopping
+│   │   └── scheduler.py          # warmup + cosine annealing
 │   ├── evaluation/
-│   │   ├── metrics.py            # VAD F1, WER/CER, RTF, exit rate
-│   │   └── evaluator.py          # Eval pipeline + automatic threshold search
+│   │   ├── metrics.py            # vad f1, wer/cer, rtf, exit rate
+│   │   └── evaluator.py          # eval pipeline + automatic threshold search
 │   └── tokenizer/
-│       └── bpe_tokenizer.py      # SentencePiece BPE wrapper
+│       └── bpe_tokenizer.py      # sentencepiece bpe wrapper
 ├── scripts/
-│   ├── prepare_data.py           # Data preparation + noise balancing
-│   ├── train.py                  # Training entry point
-│   ├── evaluate.py               # Evaluation entry point
-│   ├── inference.py              # Single-file inference demo
-│   └── sanity_check.py           # Verify model builds & gradients flow
+│   ├── prepare_data.py           # data preparation + noise balancing
+│   ├── train.py                  # training entry point
+│   ├── evaluate.py               # evaluation entry point
+│   ├── inference.py              # single-file inference demo
+│   └── sanity_check.py           # verify model builds & gradients flow
 ├── requirements.txt
-└── README.md
+└── readme.md
 ```
 
-## Quick Start
+## quick start
 
-### 1. Install dependencies
+### 1. install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Prepare data
+### 2. prepare data
 
-The data pipeline expects a **locally available** BUD500 dataset (no automatic download). Background noise is sourced from Freesound and/or synthetically generated to match the speech volume.
+the data pipeline expects a **locally available** bud500 dataset (no automatic download). background noise is sourced from freesound, curated public sound datasets (esc-50, fsd50k, arca23k, fsdnoisy18k), and/or synthetically generated to match the speech volume.
 
-#### 2a. Set up directory structure
+#### 2a. set up directory structure
 
-Place your downloaded BUD500 dataset in the path specified by `data.bud500_local_dir` in the config (default: `data/bud500/`):
+place your downloaded bud500 dataset in the path specified by `data.bud500_local_dir` in the config (default: `data/bud500/`):
 
 ```
 data/
@@ -92,238 +92,216 @@ data/
 │   ├── train/          # *.wav, *.flac, *.parquet, or *.jsonl
 │   └── test/
 └── bpe_4000/
-    └── bpe.model       # SentencePiece tokenizer
+    └── bpe.model       # sentencepiece tokenizer
 ```
 
-#### 2b. Generate manifests (local BUD500 only)
+#### 2b. generate manifests (local bud500 only)
 
 ```bash
 python scripts/prepare_data.py --config configs/default.yaml
 ```
 
-This will:
-1. **Scan** your local BUD500 directory and create speech manifests (`speech_train.jsonl`, `speech_test.jsonl`)
-2. **Count** the speech samples and total hours
-3. **Generate synthetic noise** (white, pink, brown, babble, hum, fan) to match the speech volume in both sample count and total hours
-4. **Create** a balanced noise manifest (`noise.jsonl`)
+this will:
+1. **scan** your local bud500 directory and create speech manifests (`speech_train.jsonl`, `speech_test.jsonl`)
+2. **count** the speech samples and total hours
+3. **generate synthetic noise** (white, pink, brown, babble, hum, fan) to match the speech volume in both sample count and total hours
+4. **create** a balanced noise manifest (`noise.jsonl`)
 
-#### 2c. (Optional) Download Freesound background noise
+#### 2c. (optional) download freesound background noise
 
-If you want real-world noise instead of (or in addition to) synthetic noise:
+if you want real-world noise instead of (or in addition to) synthetic noise:
 
 ```bash
 python scripts/prepare_data.py --config configs/default.yaml \
-    --download_freesound --freesound_api_key YOUR_API_KEY
+    --download_freesound --freesound_api_key your_api_key
 ```
 
-Get an API key at [freesound.org/apiv2/apply](https://freesound.org/apiv2/apply/). This downloads noise across 30 categories (air-conditioner, rain, traffic, crowd, etc.) and resamples to 16kHz mono WAV.
+get an api key at [freesound.org/apiv2/apply](https://freesound.org/apiv2/apply/). this downloads noise across 30 categories (air-conditioner, rain, traffic, crowd, etc.) and resamples to 16khz mono wav.
 
-You can customize the download:
+you can customize the download:
 
 ```bash
-# Limit to 50 sounds per category
+# limit to 50 sounds per category
 python scripts/prepare_data.py --config configs/default.yaml \
-    --download_freesound --freesound_api_key YOUR_KEY \
+    --download_freesound --freesound_api_key your_key \
     --max_per_category 50
 
-# Use specific categories only
+# use specific categories only
 python scripts/prepare_data.py --config configs/default.yaml \
-    --download_freesound --freesound_api_key YOUR_KEY \
+    --download_freesound --freesound_api_key your_key \
     --freesound_categories rain traffic wind crowd-noise
 
-# Skip resampling (if data is already 16kHz WAV)
+# skip resampling (if data is already 16khz wav)
 python scripts/prepare_data.py --config configs/default.yaml \
-    --download_freesound --freesound_api_key YOUR_KEY \
+    --download_freesound --freesound_api_key your_key \
     --skip_resample
 ```
 
-Any remaining deficit (speech samples/hours not covered by Freesound downloads) is filled with synthetic noise automatically.
+#### 2d. (optional) download public sound datasets
 
-#### 2d. Quick test with limited samples
+you can also programmatically download public audio datasets to use as non-voice background noise. the pipeline will automatically fetch the data, filter out all human-activity classes (like speech, singing, crying, etc.), and resample the remaining clips to 16khz.
+
+```bash
+# download all 4 supported datasets (fsd50k, arca23k, fsdnoisy18k, esc-50)
+python scripts/prepare_data.py --config configs/default.yaml \
+    --download_datasets --cleanup_raw
+
+# download only specific datasets
+python scripts/prepare_data.py --config configs/default.yaml \
+    --download_datasets --datasets esc50 fsdnoisy18k --cleanup_raw
+```
+
+*note: the `--cleanup_raw` flag deletes the heavy original `.zip` archives and temporary uncompressed files immediately after processing to save disk space. you can change where these datasets are downloaded and saved by updating `public_datasets_download_dir` and `public_datasets_noise_dir` under `data:` in `configs/default.yaml`.*
+
+any remaining deficit (speech samples/hours not covered by freesound or public downloads) is filled with synthetic noise automatically.
+
+#### 2e. quick test with limited samples
 
 ```bash
 python scripts/prepare_data.py --config configs/default.yaml --max_samples 1000
 ```
 
-#### 2e. Force re-generation of manifests
+#### 2f. force re-generation of manifests
 
 ```bash
 python scripts/prepare_data.py --config configs/default.yaml --force
 ```
 
-### 3. Train
+### 3. train
 
-#### Standard Training
+#### standard training
 
 ```bash
-# Full training
+# full training
 python scripts/train.py --config configs/default.yaml
 
-# Debug mode (small dataset, few epochs)
+# debug mode (small dataset, few epochs)
 python scripts/train.py --config configs/default.yaml \
     --debug --max_samples 10 --max_epochs 50
 
-# Resume from checkpoint
+# resume from checkpoint
 python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
 ```
 
-#### Transfer Learning with NeMo Pretrained Conformer
+#### transfer learning with nemo weights
 
-You can initialize the Conformer encoder (and optionally the CTC head) from an NVIDIA NeMo pretrained ASR model. The VADASR Conformer is architecturally identical to NeMo's — same relative positional multi-head attention, Macaron-style feed-forward, depthwise separable convolution — so **all weights load directly by name with zero skipped parameters**.
+you can load pretrained weights from a nemo `.nemo`, `.ckpt`, or `.pth` file. the loader uses shape-based matching to transfer weights into the vadasr architecture. 
 
-##### Supported NeMo Models
-
-| Model | `d_model` | `n_layers` | `n_heads` | `conv_kernel` | Config values |
-|-------|-----------|------------|-----------|---------------|---------------|
-| Conformer-CTC-BPE Small | 176 | 16 | 4 | 31 | `encoder_dim: 176, num_layers: 16, ffn_dim: 704` |
-| Conformer-CTC-BPE Medium | 256 | 16 | 4 | 31 | `encoder_dim: 256, num_layers: 16, ffn_dim: 1024` |
-| FastConformer-CTC-BPE | 512 | 18 | 8 | 9 | `encoder_dim: 512, num_layers: 18, ffn_dim: 2048` |
-
-> **Important:** The `conformer` section in `configs/default.yaml` **must** match the NeMo model's architecture. The default config ships with Conformer-Small values (`encoder_dim: 176`, `num_layers: 16`, `ffn_dim: 704`).
-
-##### Accepted File Formats
-
-- `.nemo` — NeMo archive (tar containing `model_weights.ckpt`)
-- `.ckpt` — PyTorch Lightning checkpoint
-- `.pth` / `.pt` — Raw PyTorch state dict
-
-##### Two-Phase Training
+**critical:** the architecture specified in `configs/default.yaml` must exactly match the nemo model (e.g. `encoder_dim`, `num_layers`, `ffn_dim`).
 
 ```bash
-# Phase 1: Load NeMo weights, freeze Conformer, train MarbleNet + VAD gate + CTC head
+# phase 1: load nemo weights, freeze conformer, train only marblenet (vad) + ctc
 python scripts/train.py --config configs/default.yaml \
-    --nemo_weights /path/to/stt_vi_conformer_ctc_small.nemo \
+    --nemo_weights /path/to/nemo_weights.pth \
     --freeze_conformer
 
-# Phase 2: Unfreeze everything, fine-tune end-to-end (resume from Phase 1 best)
+# phase 2: unfreeze conformer, train end-to-end (resume from phase 1)
 python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
 ```
 
-##### Single-Phase Training (no freeze)
+### 4. evaluate
 
 ```bash
-python scripts/train.py --config configs/default.yaml \
-    --nemo_weights /path/to/stt_vi_conformer_ctc_small.nemo
-```
-
-##### Using a Different NeMo Model Size
-
-To use a different model (e.g., Medium), update `configs/default.yaml`:
-
-```yaml
-conformer:
-  encoder_dim: 256       # match NeMo d_model
-  num_layers: 16         # match NeMo n_layers
-  ffn_dim: 1024          # encoder_dim × 4
-  num_heads: 4           # match NeMo n_heads
-```
-
-Then train:
-
-```bash
-python scripts/train.py --config configs/default.yaml \
-    --nemo_weights /path/to/stt_vi_conformer_ctc_medium.nemo \
-    --freeze_conformer
-```
-
-### 4. Evaluate
-
-```bash
-# Standard evaluation
+# standard evaluation
 python scripts/evaluate.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt
 
-# With automatic gate threshold search
+# with automatic gate threshold search
 python scripts/evaluate.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --threshold_search
 
-# Override threshold manually
+# override threshold manually
 python scripts/evaluate.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --threshold 0.45
 ```
 
-### 5. Inference
+### 5. inference
 
 ```bash
-# Single file
+# single file
 python scripts/inference.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --audio_path test.wav
 
-# Directory of files
+# directory of files
 python scripts/inference.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --audio_dir wav/
 
-# With custom gate threshold
+# with custom gate threshold
 python scripts/inference.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --audio_dir wav/ --threshold 0.4
 ```
 
-Example output:
+example output:
 ```
-[SPEECH]  recording_001.wav (gate=0.987, 42.3ms, RTF=0.021, dur=2.0s)
+[speech]  recording_001.wav (gate=0.987, 42.3ms, rtf=0.021, dur=2.0s)
   → ai cho phép em uống nhiều rượu như vậy
 
-[SILENCE (early exit)]  noise_clip.wav (gate=0.023, 1.2ms, RTF=0.001, dur=1.5s)
+[silence (early exit)]  noise_clip.wav (gate=0.023, 1.2ms, rtf=0.001, dur=1.5s)
 ```
 
-### 6. Sanity check
+### 6. sanity check
 
-Verify the model builds correctly, forward pass runs, gradients flow, and early exit works:
+verify the model builds correctly, forward pass runs, gradients flow, and early exit works:
 
 ```bash
 python scripts/sanity_check.py
 ```
 
-## Dataset
+## dataset
 
-| Source | Type | Purpose |
+| source | type | purpose |
 |--------|------|---------|
-| [BUD500](https://huggingface.co/datasets/linhtran92/viet_bud500) | ~500h Vietnamese speech | ASR training (speech class) |
-| [Freesound](https://freesound.org/) | 30 noise categories | Background noise (download optional) |
-| Synthetic | White/pink/brown/babble/hum/fan | Auto-generated to balance speech volume |
+| [bud500](https://huggingface.co/datasets/linhtran92/viet_bud500) | ~500h vietnamese speech | asr training (speech class) |
+| [freesound](https://freesound.org/) | 30 noise categories | background noise (download optional) |
+| [esc-50](https://github.com/karolpiczak/esc-50) | env. sound classification | background noise (filtered) |
+| [fsd50k](https://zenodo.org/records/4060432) | freesound dataset 50k | background noise (filtered) |
+| [arca23k](https://zenodo.org/records/5117901) | audio related clips | background noise (filtered) |
+| [fsdnoisy18k](https://zenodo.org/records/2529934) | noisy audio dataset | background noise (filtered) |
+| synthetic | white/pink/brown/babble/hum/fan | auto-generated to balance speech volume |
 
-The data pipeline automatically balances noise to match speech:
-- Counts BUD500 train samples and total hours
-- If existing noise is insufficient, generates synthetic noise to fill the gap
-- Final noise manifest has ≥ same count and ≥ same hours as speech
+the data pipeline automatically balances noise to match speech:
+- counts bud500 train samples and total hours
+- if existing noise is insufficient, generates synthetic noise to fill the gap
+- final noise manifest has ≥ same count and ≥ same hours as speech
 
-## Configuration
+## configuration
 
-All hyperparameters are in `configs/default.yaml`. Key sections:
+all hyperparameters are in `configs/default.yaml`. key sections:
 
-| Section | What it controls |
+| section | what it controls |
 |---------|-----------------|
-| `features` | Mel spectrogram (n_mels, n_fft, hop, sample rate) |
-| `marblenet` | VAD encoder (blocks, channels, kernels, dropout) |
-| `gate` | Early exit threshold, temperature, hidden dim |
-| `conformer` | ASR encoder (layers, heads, dims, conv kernel) |
-| `tokenizer` | SentencePiece model path and vocab size |
-| `data` | Dataset paths, speech/noise ratio, workers |
-| `augmentation` | Speed perturb, SpecAugment, noise mixing |
-| `training` | Batch size, LR, epochs, loss weights, checkpointing |
-| `evaluation` | Batch size, threshold search range |
+| `features` | mel spectrogram (n_mels, n_fft, hop, sample rate) |
+| `marblenet` | vad encoder (blocks, channels, kernels, dropout) |
+| `gate` | early exit threshold, temperature, hidden dim |
+| `conformer` | asr encoder (layers, heads, dims, conv kernel) |
+| `tokenizer` | sentencepiece model path and vocab size |
+| `data` | dataset paths, speech/noise ratio, workers |
+| `augmentation` | speed perturb, specaugment, noise mixing |
+| `training` | batch size, lr, epochs, loss weights, checkpointing |
+| `evaluation` | batch size, threshold search range |
 
-## Metrics
+## metrics
 
-| Metric | Target |
+| metric | target |
 |--------|--------|
-| VAD F1 | ≥ 0.95 |
-| WER | Comparable to standalone Conformer |
-| Exit Rate (noise) | ≥ 90% |
-| RTF Improvement | Measured vs always-decode baseline |
+| vad f1 | ≥ 0.95 |
+| wer | comparable to standalone conformer |
+| exit rate (noise) | ≥ 90% |
+| rtf improvement | measured vs always-decode baseline |
 
-## SOLID Principles
+## solid principles
 
-| Principle | Where |
+| principle | where |
 |-----------|-------|
-| **S**ingle Responsibility | Each module has exactly one job |
-| **O**pen/Closed | `AugmentationPipeline` accepts new transforms without modification |
-| **L**iskov Substitution | `VADASRDataset` implements standard `torch.utils.data.Dataset` |
-| **I**nterface Segregation | `TokenizerProtocol` exposes only `encode`/`decode`/`vocab_size`/`blank_id` |
-| **D**ependency Inversion | `VADASRModel` accepts all sub-modules via constructor injection |
+| **s**ingle responsibility | each module has exactly one job |
+| **o**pen/closed | `augmentationpipeline` accepts new transforms without modification |
+| **l**iskov substitution | `vadasrdataset` implements standard `torch.utils.data.dataset` |
+| **i**nterface segregation | `tokenizerprotocol` exposes only `encode`/`decode`/`vocab_size`/`blank_id` |
+| **d**ependency inversion | `vadasrmodel` accepts all sub-modules via constructor injection |
 
-## License
+## license
 
-Apache 2.0
+apache 2.0
+
