@@ -59,7 +59,7 @@ tokenizer:
 # --- Dataset ---
 data:
   # Local BUD500 dataset (already downloaded — no re-download)
-  bud500_local_dir: "/home/datasets/data/bud500"        # root dir with train/ and test/ subdirs
+  bud500_local_dir: "/home/datasets/viet_bud500"        # root dir with train/ and test/ subdirs
 
   # Background noise data
   noise_dir: "/home/datasets/background_noise"             # raw Freesound downloads (any format)
