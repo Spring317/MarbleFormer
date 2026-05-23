@@ -91,29 +91,47 @@ class Trainer:
         self.writer = SummaryWriter(log_dir=str(self.ckpt_dir / "logs"))
         self.global_step = 0
 
+        # NaN tracking
+        self._nan_count = 0
+        self._max_nan_batches = cfg.get("max_nan_batches_per_epoch", 50)
+
     def train(self) -> None:
         """Run the full training loop."""
         logger.info("Starting training for %d epochs", self.max_epochs)
 
         for epoch in range(1, self.max_epochs + 1):
             t0 = time.time()
+            self._nan_count = 0
             train_metrics = self._train_epoch(epoch)
             val_metrics = self._validate(epoch)
             elapsed = time.time() - t0
 
+            # Check for NaN epoch
+            if not torch.isfinite(torch.tensor(train_metrics["total"])):
+                logger.error(
+                    "Epoch %d produced NaN loss! "
+                    "NaN batches this epoch: %d. Stopping training.",
+                    epoch, self._nan_count,
+                )
+                break
+
             # Logging
             logger.info(
                 "Epoch %d/%d | Train Loss: %.4f (vad=%.4f, ctc=%.4f) | "
-                "Val Loss: %.4f | Time: %.1fs",
+                "Val Loss: %.4f | NaN batches: %d | Time: %.1fs",
                 epoch, self.max_epochs,
                 train_metrics["total"], train_metrics["vad"],
-                train_metrics["ctc"], val_metrics["total"], elapsed,
+                train_metrics["ctc"], val_metrics["total"],
+                self._nan_count, elapsed,
             )
 
             self.writer.add_scalars("loss/train", train_metrics, epoch)
             self.writer.add_scalars("loss/val", val_metrics, epoch)
             self.writer.add_scalar(
                 "lr", self.optimizer.param_groups[0]["lr"], epoch
+            )
+            self.writer.add_scalar(
+                "nan_batches", self._nan_count, epoch
             )
 
             # Checkpointing
@@ -166,24 +184,68 @@ class Trainer:
                 )
                 loss = losses["total"] / self.grad_accum
 
+            # --- NaN detection: skip bad batches ---
+            if not torch.isfinite(loss):
+                self._nan_count += 1
+                if self._nan_count <= 5 or self._nan_count % 10 == 0:
+                    logger.warning(
+                        "NaN/Inf loss at batch %d (epoch %d), skipping. "
+                        "Total NaN batches this epoch: %d",
+                        batch_idx, epoch, self._nan_count,
+                    )
+                # Zero out accumulated gradients to prevent corruption
+                self.optimizer.zero_grad()
+                if self._nan_count >= self._max_nan_batches:
+                    logger.error(
+                        "Too many NaN batches (%d), aborting epoch.",
+                        self._nan_count,
+                    )
+                    return {k: float("nan") for k in running}
+                continue
+
             self.scaler.scale(loss).backward()
 
             if (batch_idx + 1) % self.grad_accum == 0:
+                # Unscale for grad clipping
                 self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(
+
+                # Check for inf/nan in gradients before clipping
+                grad_norm = nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
+
+                # Log gradient norm periodically
+                if self.global_step % 100 == 0:
+                    self.writer.add_scalar(
+                        "grad_norm", grad_norm.item()
+                        if torch.isfinite(grad_norm) else 0.0,
+                        self.global_step,
+                    )
+
+                if not torch.isfinite(grad_norm):
+                    # Gradients are corrupted — skip this optimizer step
+                    logger.warning(
+                        "Non-finite grad norm (%.4f) at step %d, "
+                        "skipping optimizer step.",
+                        grad_norm.item(), self.global_step,
+                    )
+                    self.optimizer.zero_grad()
+                    self.global_step += 1
+                    continue
+
                 scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
-                
+
+                # Only step scheduler if scaler didn't skip
                 scale_after = self.scaler.get_scale()
                 if scale_before <= scale_after:
                     self.scheduler.step()
-                    
+
                 self.global_step += 1
 
+            # Only accumulate finite losses
             running["total"] += losses["total"].item()
             running["vad"] += losses["vad"].item()
             running["ctc"] += losses["ctc"].item()
@@ -205,15 +267,20 @@ class Trainer:
             token_lengths = batch["token_lengths"].to(self.device)
             has_voice = batch["has_voice"].to(self.device)
 
-            output = self.model(waveform, wav_lengths)
-            losses = self.criterion(
-                gate_logits=output.gate_logits,
-                ctc_log_probs=output.ctc_log_probs,
-                ctc_lengths=output.ctc_lengths,
-                token_ids=token_ids,
-                token_lengths=token_lengths,
-                has_voice=has_voice,
-            )
+            with autocast(enabled=self.use_amp):
+                output = self.model(waveform, wav_lengths)
+                losses = self.criterion(
+                    gate_logits=output.gate_logits,
+                    ctc_log_probs=output.ctc_log_probs,
+                    ctc_lengths=output.ctc_lengths,
+                    token_ids=token_ids,
+                    token_lengths=token_lengths,
+                    has_voice=has_voice,
+                )
+
+            # Skip NaN validation batches
+            if not torch.isfinite(losses["total"]):
+                continue
 
             running["total"] += losses["total"].item()
             running["vad"] += losses["vad"].item()

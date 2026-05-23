@@ -218,11 +218,29 @@ def main() -> None:
         for param in model.conformer.parameters():
             param.requires_grad = False
 
-    # ---- Optimizer ----
+    # ---- Optimizer (separate LR groups for VAD vs ASR) ----
+    vad_lr_scale = train_cfg.get("vad_lr_scale", 0.1)
+    base_lr = train_cfg["learning_rate"]
+    weight_decay = train_cfg.get("weight_decay", 0.0001)
+
+    # Group 1: VAD branch (MarbleNet + VADGate) — converges fast, use lower LR
+    vad_params = list(model.marblenet.parameters()) + list(model.vad_gate.parameters())
+    # Group 2: ASR branch (Conformer + CTC Head) — needs higher LR
+    asr_params = list(model.conformer.parameters()) + list(model.ctc_head.parameters())
+
+    param_groups = [
+        {"params": vad_params, "lr": base_lr * vad_lr_scale, "name": "vad"},
+        {"params": asr_params, "lr": base_lr, "name": "asr"},
+    ]
+    logger.info(
+        "Optimizer LR groups: VAD=%.6f, ASR=%.6f",
+        base_lr * vad_lr_scale, base_lr,
+    )
+
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_cfg["learning_rate"],
-        weight_decay=train_cfg.get("weight_decay", 0.0001),
+        param_groups,
+        lr=base_lr,
+        weight_decay=weight_decay,
     )
 
     # ---- Scheduler ----

@@ -7,8 +7,12 @@ CTC loss is zeroed out for noise-only samples where has_voice=False.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 class VADASRLoss(nn.Module):
@@ -83,14 +87,42 @@ class VADASRLoss(nn.Module):
             input_lengths = ctc_lengths[voice_indices]
             target_lengths = token_lengths[voice_indices]
 
-            # Clamp lengths to valid range
-            input_lengths = input_lengths.clamp(min=1)
-            target_lengths = target_lengths.clamp(min=1)
+            # Clamp lengths to valid range — critical for preventing NaN
+            # input_lengths must not exceed actual T dimension of ctc_input
+            max_T = ctc_input.size(0)
+            input_lengths = input_lengths.clamp(min=1, max=max_T)
+
+            # target_lengths must not exceed actual S dimension of ctc_target
+            max_S = ctc_target.size(1)
+            target_lengths = target_lengths.clamp(min=1, max=max_S)
+
+            # CTC requires input_lengths >= target_lengths for valid alignment.
+            # Clamp target_lengths to be at most input_lengths to prevent NaN.
+            target_lengths = torch.min(target_lengths, input_lengths)
+
+            # Ensure log_probs are valid (no -inf or NaN from log_softmax)
+            # This can happen when softmax produces exact zeros in FP16
+            ctc_input = ctc_input.clamp(min=-100.0)
 
             ctc_loss = self.ctc_loss(
                 ctc_input, ctc_target,
                 input_lengths, target_lengths,
             )
+
+            # Final safety net: if CTC still produces NaN (e.g. from
+            # degenerate length combinations), replace with zero
+            if not torch.isfinite(ctc_loss):
+                logger.warning(
+                    "CTC loss is non-finite (%.4f), replacing with 0. "
+                    "input_lengths range: [%d, %d], "
+                    "target_lengths range: [%d, %d], max_T: %d",
+                    ctc_loss.item(),
+                    input_lengths.min().item(), input_lengths.max().item(),
+                    target_lengths.min().item(), target_lengths.max().item(),
+                    max_T,
+                )
+                ctc_loss = torch.tensor(0.0, device=gate_logits.device,
+                                        requires_grad=True)
         else:
             ctc_loss = torch.tensor(0.0, device=gate_logits.device)
 

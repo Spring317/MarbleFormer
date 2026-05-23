@@ -98,11 +98,15 @@ training:
   batch_size: 64
   gradient_accumulation_steps: 2
   max_epochs: 100
-  learning_rate: 0.001
+  learning_rate: 0.0005            # halved from 0.001 for stability
   weight_decay: 0.0001
-  max_grad_norm: 5.0
+  max_grad_norm: 1.0               # tighter clipping (was 5.0) prevents gradient explosion
   use_amp: true
   seed: 42
+
+  # Separate LR scaling for VAD branch (MarbleNet + Gate)
+  # VAD converges much faster (~300K params vs ~13M Conformer)
+  vad_lr_scale: 0.1                # VAD branch gets LR * 0.1
 
   # Loss weights
   lambda_vad: 1.0
@@ -112,8 +116,11 @@ training:
   ctc_reduction: "mean_batch"
 
   # Warmup + Cosine Annealing
-  warmup_steps: 1000
+  warmup_steps: 2500               # longer warmup (was 1000) for training stability
   min_lr: 0.00001
+
+  # NaN safety
+  max_nan_batches_per_epoch: 50    # abort epoch if too many NaN batches
 
   # Checkpointing
   checkpoint_dir: "checkpoints"
