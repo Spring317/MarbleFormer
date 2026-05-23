@@ -209,7 +209,7 @@ class Trainer:
                 # Unscale for grad clipping
                 self.scaler.unscale_(self.optimizer)
 
-                # Check for inf/nan in gradients before clipping
+                # Clip gradients (returns inf if any grad is non-finite)
                 grad_norm = nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
@@ -223,16 +223,16 @@ class Trainer:
                     )
 
                 if not torch.isfinite(grad_norm):
-                    # Gradients are corrupted — skip this optimizer step
                     logger.warning(
                         "Non-finite grad norm (%.4f) at step %d, "
-                        "skipping optimizer step.",
+                        "scaler will skip optimizer step.",
                         grad_norm.item(), self.global_step,
                     )
-                    self.optimizer.zero_grad()
-                    self.global_step += 1
-                    continue
 
+                # Always call step() + update() after unscale_().
+                # The scaler internally detects inf/nan grads and skips
+                # the actual optimizer.step() — but it must be called to
+                # reset the scaler's internal state for the next iteration.
                 scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
