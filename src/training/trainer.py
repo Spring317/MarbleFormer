@@ -90,6 +90,7 @@ class Trainer:
         # Logging
         self.writer = SummaryWriter(log_dir=str(self.ckpt_dir / "logs"))
         self.global_step = 0
+        self.start_epoch = 1
 
         # NaN tracking
         self._nan_count = 0
@@ -99,7 +100,7 @@ class Trainer:
         """Run the full training loop."""
         logger.info("Starting training for %d epochs", self.max_epochs)
 
-        for epoch in range(1, self.max_epochs + 1):
+        for epoch in range(self.start_epoch, self.max_epochs + 1):
             t0 = time.time()
             self._nan_count = 0
             train_metrics = self._train_epoch(epoch)
@@ -335,5 +336,9 @@ class Trainer:
         self.best_metric = ckpt.get("best_metric", float("inf"))
         self.global_step = ckpt.get("global_step", 0)
         epoch = ckpt["epoch"]
-        logger.info("Loaded checkpoint from epoch %d", epoch)
+        self.start_epoch = epoch + 1
+        logger.info(
+            "Loaded checkpoint from epoch %d — will resume from epoch %d",
+            epoch, self.start_epoch,
+        )
         return epoch

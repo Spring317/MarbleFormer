@@ -72,7 +72,7 @@ data:
   manifest_dir: "/home/datasets/data/manifest"
 
   speech_noise_ratio: 0.7   # 70% speech, 30% noise per epoch
-  max_audio_len_sec: 15.0
+  max_audio_len_sec: 12.0
   min_audio_len_sec: 0.5
   num_workers: 8
   pin_memory: true
@@ -95,8 +95,8 @@ augmentation:
 
 # --- Training ---
 training:
-  batch_size: 64
-  gradient_accumulation_steps: 2
+  batch_size: 32
+  gradient_accumulation_steps: 4
   max_epochs: 100
   learning_rate: 0.0005            # halved from 0.001 for stability
   weight_decay: 0.0001
