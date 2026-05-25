@@ -25,6 +25,7 @@ from src.data.dataset import VADASRDataset
 from src.data.collator import VADASRCollator
 from src.models.vadasr_model import VADASRModel
 from src.evaluation.evaluator import Evaluator
+from src.models.nemo_loader import load_nemo_weights
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,8 +40,12 @@ def main() -> None:
         "--config", type=str, default="configs/default.yaml",
     )
     parser.add_argument(
-        "--checkpoint", type=str, required=True,
+        "--checkpoint", type=str, default=None,
         help="Path to model checkpoint",
+    )
+    parser.add_argument(
+        "--nemo_weights", type=str, default=None,
+        help="Path to NeMo .nemo/.ckpt/.pth file for pretrained Conformer weights",
     )
     parser.add_argument(
         "--threshold", type=float, default=None,
@@ -55,6 +60,9 @@ def main() -> None:
         help="Data split to evaluate",
     )
     args = parser.parse_args()
+
+    if not args.checkpoint and not args.nemo_weights:
+        parser.error("Must provide either --checkpoint or --nemo_weights")
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
@@ -91,9 +99,32 @@ def main() -> None:
 
     # Model
     model = VADASRModel.from_config(cfg, vocab_size=tokenizer.vocab_size)
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    logger.info("Loaded checkpoint: %s (epoch %d)", args.checkpoint, ckpt["epoch"])
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        logger.info("Loaded checkpoint: %s (epoch %d)", args.checkpoint, ckpt.get("epoch", -1))
+        
+    if args.nemo_weights:
+        logger.info("Loading NeMo pretrained weights...")
+        nemo_diag = load_nemo_weights(
+            model,
+            args.nemo_weights,
+            load_conformer=True,
+            load_ctc_head=True,
+            freeze_loaded=False,
+            device=device,
+        )
+        arch = nemo_diag["nemo_arch"]
+        logger.info(
+            "NeMo model: %s (d_model=%d, n_layers=%d)",
+            arch["model_type"], arch["d_model"], arch["n_layers"],
+        )
+        logger.info(
+            "Loaded: %d conformer + %d ctc params, %d skipped",
+            nemo_diag["conformer_loaded"],
+            nemo_diag["ctc_loaded"],
+            len(nemo_diag["skipped"]),
+        )
 
     # Evaluator
     evaluator = Evaluator(model=model, tokenizer=tokenizer, device=device)
