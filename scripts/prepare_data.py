@@ -358,6 +358,7 @@ def _manifest_from_arrow(
                 "audio_filepath": str(wav_path.resolve()),
                 "text": text.strip(),
                 "duration": round(duration, 4),
+                "is_speech": True,
             }
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             count += 1
@@ -420,6 +421,7 @@ def _manifest_from_parquet(
                 "audio_filepath": str(wav_path),
                 "text": text.strip(),
                 "duration": duration,
+                "is_speech": True,
             }
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             count += 1
@@ -513,6 +515,7 @@ def _manifest_from_audio_dir(
                     "audio_filepath": str(audio_file),
                     "text": text,
                     "duration": info.duration,
+                    "is_speech": True,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 count += 1
@@ -832,8 +835,9 @@ def prepare_noise_manifest(
                 info = sf.info(str(audio_file))
                 entry = {
                     "audio_filepath": str(audio_file.resolve()),
-                    "text": " ",
+                    "text": "",
                     "duration": info.duration,
+                    "is_speech": False,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 count += 1
@@ -1803,8 +1807,9 @@ def balance_noise_to_speech(
                 info = sf.info(str(audio_file))
                 entry = {
                     "audio_filepath": str(audio_file.resolve()),
-                    "text": " ",
+                    "text": "",
                     "duration": info.duration,
+                    "is_speech": False,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 appended += 1
@@ -2190,4 +2195,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

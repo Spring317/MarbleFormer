@@ -332,14 +332,17 @@ def _load_ctc_head(
         for target_key, target_val in ctc_state.items():
             if target_key in used_target:
                 continue
-            if nemo_val.shape == target_val.shape:
-                ctc_state[target_key] = nemo_val
+            # NeMo uses Conv1d for CTC so weight is [V, D, 1]. We use Linear [V, D].
+            nemo_squeezed = nemo_val.squeeze(-1) if nemo_val.dim() == 3 else nemo_val
+            
+            if nemo_squeezed.shape == target_val.shape:
+                ctc_state[target_key] = nemo_squeezed
                 loaded += 1
                 used_nemo.add(nemo_key)
                 used_target.add(target_key)
                 logger.info(
-                    "  CTC: %s → %s %s", nemo_key, target_key,
-                    list(nemo_val.shape),
+                    "  CTC: %s → %s %s (original %s)", nemo_key, target_key,
+                    list(nemo_squeezed.shape), list(nemo_val.shape)
                 )
                 break
 

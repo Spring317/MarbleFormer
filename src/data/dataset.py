@@ -1,9 +1,17 @@
 """
-Unified dataset for VADASR — combines BUD500 speech + noise data.
+Unified dataset for VADASR — loads from a single combined manifest.
 
-Liskov Substitution: Implements standard torch Dataset interface.
-Single Responsibility: Load, preprocess, and yield audio samples with
-VAD labels.
+Each entry in the manifest has the format:
+    {
+        "audio_filepath": "/abs/path/to/audio.wav",
+        "text":           "transcription or empty string",
+        "duration":       3.45,
+        "is_speech":      true | false
+    }
+
+The VAD encoder + gate learns from ``is_speech``.
+The Conformer CTC head learns from ``text`` (tokenized on-the-fly with BPE).
+Tokenization is skipped silently if the tokenizer is not provided.
 """
 
 from __future__ import annotations
@@ -14,7 +22,6 @@ import random
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 import torchaudio
 from torch.utils.data import Dataset
@@ -23,87 +30,70 @@ logger = logging.getLogger(__name__)
 
 
 class VADASRDataset(Dataset):
-    """Unified speech + noise dataset.
+    """Unified speech + noise dataset loaded from a single JSONL manifest.
 
-    Combines BUD500 (speech with transcription) and noise data
-    (silence / non-speech) into a single dataset with dual labels:
-    ``has_voice`` (bool) and ``text`` (str).
+    Each manifest entry must have:
+        - ``audio_filepath`` (str): absolute path to audio file.
+        - ``text``           (str): transcription for speech; empty for noise.
+        - ``duration``       (float): duration in seconds.
+        - ``is_speech``      (bool): True for speech, False for noise/non-speech.
 
     Parameters
     ----------
-    speech_data : list[dict]
-        List of speech samples: {"audio_path": str, "text": str}.
-    noise_data : list[dict]
-        List of noise samples: {"audio_path": str}.
+    data : list[dict]
+        Pre-loaded list of manifest entries.
     sample_rate : int
-        Target sample rate.
+        Target sample rate (audio is resampled if necessary).
     max_audio_len_sec : float
-        Maximum audio length in seconds (longer clips are truncated).
+        Clips longer than this are truncated.
     min_audio_len_sec : float
-        Minimum audio length in seconds (shorter clips are skipped).
-    speech_noise_ratio : float
-        Fraction of speech samples per epoch (0.7 = 70% speech).
-    tokenizer : Any
-        Tokenizer with ``encode(text) -> list[int]``.
+        Clips shorter than this are zero-padded.
+    tokenizer : Any | None
+        Tokenizer with ``encode(text) -> list[int]``. If None, token_ids
+        will always be an empty list (graceful degradation — the CTC loss
+        will simply be skipped for those batches by the trainer).
     augmentation : Any | None
-        Optional augmentation pipeline.
+        Optional augmentation pipeline applied to the waveform.
     """
 
     def __init__(
         self,
-        speech_data: list[dict],
-        noise_data: list[dict],
+        data: list[dict],
         sample_rate: int = 16000,
         max_audio_len_sec: float = 15.0,
         min_audio_len_sec: float = 0.5,
-        speech_noise_ratio: float = 0.7,
         tokenizer: Any = None,
         augmentation: Any = None,
     ) -> None:
+        self.data = data
         self.sample_rate = sample_rate
         self.max_samples = int(max_audio_len_sec * sample_rate)
         self.min_samples = int(min_audio_len_sec * sample_rate)
         self.tokenizer = tokenizer
         self.augmentation = augmentation
 
-        # Build combined dataset with balanced sampling
-        self.speech_data = speech_data
-        self.noise_data = noise_data
+        if tokenizer is None:
+            logger.warning(
+                "VADASRDataset: no tokenizer provided — token_ids will be "
+                "empty for all samples. CTC loss will be skipped."
+            )
 
-        # Compute epoch size based on ratio
-        n_speech = len(speech_data)
-        n_noise = len(noise_data)
-
-        if speech_noise_ratio > 0 and n_noise > 0:
-            target_noise = int(n_speech * (1 - speech_noise_ratio) / speech_noise_ratio)
-            target_noise = min(target_noise, n_noise)
-        else:
-            target_noise = n_noise
-
-        self._indices: list[tuple[str, int]] = []
-        for i in range(n_speech):
-            self._indices.append(("speech", i))
-        for i in range(target_noise):
-            self._indices.append(("noise", i % n_noise))
-
-        random.shuffle(self._indices)
+        n_speech = sum(1 for e in data if e.get("is_speech", False))
+        n_noise = len(data) - n_speech
+        logger.info(
+            "Dataset loaded: %d total (%d speech, %d noise)",
+            len(data), n_speech, n_noise,
+        )
 
     def __len__(self) -> int:
-        return len(self._indices)
+        return len(self.data)
 
     def __getitem__(self, idx: int) -> dict:
-        source, data_idx = self._indices[idx]
+        entry = self.data[idx]
 
-        if source == "speech":
-            item = self.speech_data[data_idx]
-            audio_path = item["audio_path"]
-            text = item.get("text", "")
-            has_voice = True
-        else:
-            item = self.noise_data[data_idx]
-            audio_path = item["audio_path"]
-            text = ""
-            has_voice = False
+        audio_path = entry["audio_filepath"]
+        text = entry.get("text", "")
+        is_speech = bool(entry.get("is_speech", False))
 
         # Load audio
         waveform, sr = torchaudio.load(audio_path)
@@ -113,103 +103,109 @@ class VADASRDataset(Dataset):
             resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
             waveform = resampler(waveform)
 
-        # Convert to mono
+        # Convert to mono [T]
         if waveform.size(0) > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
-        waveform = waveform.squeeze(0)  # [T]
+        waveform = waveform.squeeze(0)
 
-        # Truncate / validate length
+        # Truncate / pad to length bounds
         if waveform.size(0) > self.max_samples:
             waveform = waveform[:self.max_samples]
         if waveform.size(0) < self.min_samples:
-            # Pad short audio
             pad_len = self.min_samples - waveform.size(0)
             waveform = torch.nn.functional.pad(waveform, (0, pad_len))
 
         wav_length = waveform.size(0)
 
-        # Apply augmentation
+        # Augmentation (training only)
         if self.augmentation is not None:
             waveform = self.augmentation(waveform)
 
-        # Tokenize text
-        token_ids = []
-        if self.tokenizer is not None and text:
-            token_ids = self.tokenizer.encode(text)
+        # Tokenize text — only for speech samples and only if tokenizer exists
+        token_ids: list[int] = []
+        if is_speech and self.tokenizer is not None and text and text.strip():
+            token_ids = self.tokenizer.encode(text.strip())
 
         return {
-            "waveform": waveform,
-            "wav_length": wav_length,
-            "text": text,
-            "token_ids": token_ids,
-            "has_voice": has_voice,
+            "waveform":  waveform,       # [T]
+            "wav_length": wav_length,    # int
+            "text":      text,           # raw transcript (or "")
+            "token_ids": token_ids,      # list[int], empty for noise
+            "has_voice": is_speech,      # bool — VAD label
         }
 
     # ------------------------------------------------------------------
-    # Factory methods
+    # Factory: load from a single unified JSONL manifest
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_hf_and_manifest(
+    def from_manifest(
         cls,
-        hf_dataset,
-        noise_manifest: str | Path,
-        noise_dir: str | Path,
+        manifest: str | Path,
         tokenizer: Any = None,
         augmentation: Any = None,
-        cache_dir: str | Path = "data/cache",
-        **kwargs,
+        sample_rate: int = 16000,
+        max_audio_len_sec: float = 15.0,
+        min_audio_len_sec: float = 0.5,
+        max_samples: int | None = None,
     ) -> "VADASRDataset":
-        """Build from HuggingFace dataset + noise manifest.
+        """Load from a single combined JSONL manifest.
+
+        The manifest is expected to have been produced by ``prepare_data.py``
+        Step 5 (combined_train/val/test.jsonl) with the unified format::
+
+            {"audio_filepath": "...", "text": "...",
+             "duration": 3.4, "is_speech": true}
 
         Parameters
         ----------
-        hf_dataset
-            HuggingFace dataset split with 'audio' and 'transcription'.
-        noise_manifest : str | Path
-            Path to JSONL manifest for noise files.
-        noise_dir : str | Path
-            Base directory for noise audio files.
+        manifest : path
+            Path to the JSONL file.
+        tokenizer : optional
+            BPE tokenizer.  Pass None to disable tokenization.
+        augmentation : optional
+            Augmentation pipeline.
+        max_samples : int | None
+            Cap on the number of samples loaded (useful for debugging).
         """
-        cache_dir = Path(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        manifest = Path(manifest)
+        if not manifest.exists():
+            raise FileNotFoundError(f"Manifest not found: {manifest}")
 
-        # Process speech data from HuggingFace
-        speech_data = []
-        for i, sample in enumerate(hf_dataset):
-            audio = sample["audio"]
-            text = sample.get("transcription", "")
+        data: list[dict] = []
+        skipped = 0
+        with open(manifest, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                path = entry.get("audio_filepath", "")
+                if not Path(path).exists():
+                    skipped += 1
+                    continue
+                data.append(entry)
+                if max_samples and len(data) >= max_samples:
+                    break
 
-            # Save audio to cache for consistent loading
-            wav_path = cache_dir / f"speech_{i:08d}.wav"
-            if not wav_path.exists():
-                waveform = torch.tensor(
-                    audio["array"], dtype=torch.float32
-                ).unsqueeze(0)
-                sr = audio["sampling_rate"]
-                torchaudio.save(str(wav_path), waveform, sr)
-
-            speech_data.append({"audio_path": str(wav_path), "text": text})
-
-        # Load noise manifest
-        noise_data = []
-        noise_manifest = Path(noise_manifest)
-        noise_dir = Path(noise_dir)
-        if noise_manifest.exists():
-            with open(noise_manifest, "r") as f:
-                for line in f:
-                    entry = json.loads(line.strip())
-                    audio_path = noise_dir / entry["audio_filepath"]
-                    if audio_path.exists():
-                        noise_data.append({"audio_path": str(audio_path)})
+        if skipped > 0:
+            logger.warning(
+                "Skipped %d entries with missing audio files in %s",
+                skipped, manifest.name,
+            )
 
         return cls(
-            speech_data=speech_data,
-            noise_data=noise_data,
+            data=data,
+            sample_rate=sample_rate,
+            max_audio_len_sec=max_audio_len_sec,
+            min_audio_len_sec=min_audio_len_sec,
             tokenizer=tokenizer,
             augmentation=augmentation,
-            **kwargs,
         )
+
+    # ------------------------------------------------------------------
+    # Legacy factory: kept for backward compatibility
+    # ------------------------------------------------------------------
 
     @classmethod
     def from_manifests(
@@ -220,56 +216,73 @@ class VADASRDataset(Dataset):
         noise_dir: str | Path = "",
         tokenizer: Any = None,
         augmentation: Any = None,
+        sample_rate: int = 16000,
+        max_audio_len_sec: float = 15.0,
+        min_audio_len_sec: float = 0.5,
+        speech_noise_ratio: float = 0.7,
         **kwargs,
     ) -> "VADASRDataset":
-        """Build from two JSONL manifests (speech + noise)."""
-        speech_data = []
-        speech_skipped = 0
+        """Legacy two-manifest loader (speech + noise separately).
+
+        Kept for backward compatibility.  New code should use
+        ``from_manifest()`` with the unified combined_*.jsonl format.
+        """
+        logger.warning(
+            "from_manifests() is deprecated. Use from_manifest() with the "
+            "unified combined_train/val/test.jsonl manifests instead."
+        )
+
+        data: list[dict] = []
+
+        # Load speech entries
         speech_manifest = Path(speech_manifest)
         if speech_manifest.exists():
-            with open(speech_manifest, "r") as f:
+            with open(speech_manifest, "r", encoding="utf-8") as f:
                 for line in f:
                     entry = json.loads(line.strip())
-                    path = entry["audio_filepath"]
+                    path = entry.get("audio_filepath", "")
                     if speech_dir:
                         path = str(Path(speech_dir) / path)
                     if Path(path).exists():
-                        speech_data.append({
-                            "audio_path": path,
+                        data.append({
+                            "audio_filepath": path,
                             "text": entry.get("text", ""),
+                            "duration": entry.get("duration", 0.0),
+                            "is_speech": entry.get("is_speech", True),
                         })
-                    else:
-                        speech_skipped += 1
-        if speech_skipped > 0:
-            logger.warning(
-                "Skipped %d speech entries with missing audio files",
-                speech_skipped,
-            )
 
-        noise_data = []
-        noise_skipped = 0
+        # Load noise entries (sampled to match speech_noise_ratio)
+        noise_entries: list[dict] = []
         noise_manifest_path = Path(noise_manifest)
         if noise_manifest_path.exists():
-            with open(noise_manifest_path, "r") as f:
+            with open(noise_manifest_path, "r", encoding="utf-8") as f:
                 for line in f:
                     entry = json.loads(line.strip())
-                    path = entry["audio_filepath"]
+                    path = entry.get("audio_filepath", "")
                     if noise_dir:
                         path = str(Path(noise_dir) / path)
                     if Path(path).exists():
-                        noise_data.append({"audio_path": path})
-                    else:
-                        noise_skipped += 1
-        if noise_skipped > 0:
-            logger.warning(
-                "Skipped %d noise entries with missing audio files",
-                noise_skipped,
-            )
+                        noise_entries.append({
+                            "audio_filepath": path,
+                            "text": "",
+                            "duration": entry.get("duration", 0.0),
+                            "is_speech": False,
+                        })
+
+        n_speech = len(data)
+        if speech_noise_ratio > 0 and noise_entries:
+            target_noise = int(n_speech * (1 - speech_noise_ratio) / speech_noise_ratio)
+            target_noise = min(target_noise, len(noise_entries))
+            noise_entries = noise_entries[:target_noise]
+
+        data.extend(noise_entries)
+        random.shuffle(data)
 
         return cls(
-            speech_data=speech_data,
-            noise_data=noise_data,
+            data=data,
+            sample_rate=sample_rate,
+            max_audio_len_sec=max_audio_len_sec,
+            min_audio_len_sec=min_audio_len_sec,
             tokenizer=tokenizer,
             augmentation=augmentation,
-            **kwargs,
         )

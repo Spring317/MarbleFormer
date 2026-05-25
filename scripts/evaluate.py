@@ -70,20 +70,33 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Using device: %s", device)
 
-    # Tokenizer
-    tokenizer = BPETokenizer.from_config(cfg["tokenizer"])
+    # Tokenizer (optional — evaluation can run without it for VAD-only metrics)
+    tokenizer = None
+    try:
+        tokenizer = BPETokenizer.from_config(cfg["tokenizer"])
+        logger.info("Tokenizer loaded: vocab_size=%d", tokenizer.vocab_size)
+    except Exception as e:
+        logger.warning("Tokenizer not available (%s) — WER/CER will be skipped.", e)
 
     # Dataset
     data_cfg = cfg["data"]
     manifest_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
-    test_dataset = VADASRDataset.from_manifests(
-        speech_manifest=manifest_dir / f"speech_{args.split}.jsonl",
-        noise_manifest=Path(data_cfg.get("noise_manifest", "data/manifest/noise.jsonl")),
+    # Map --split to the unified manifest name (test → combined_test.jsonl)
+    split_name = args.split
+    manifest_file = manifest_dir / f"combined_{split_name}.jsonl"
+    if not manifest_file.exists():
+        # Fallback for legacy split naming (e.g. speech_test.jsonl)
+        manifest_file = manifest_dir / f"speech_{split_name}.jsonl"
+        logger.warning(
+            "combined_%s.jsonl not found, falling back to %s",
+            split_name, manifest_file.name,
+        )
+    test_dataset = VADASRDataset.from_manifest(
+        manifest=manifest_file,
         tokenizer=tokenizer,
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),
         min_audio_len_sec=data_cfg.get("min_audio_len_sec", 0.5),
-        speech_noise_ratio=0.5,
     )
 
     collator = VADASRCollator()

@@ -113,30 +113,25 @@ def main() -> None:
     # ---- Datasets ----
     logger.info("Loading datasets...")
     manifest_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
-    speech_manifest_train = manifest_dir / "speech_train.jsonl"
-    speech_manifest_test = manifest_dir / "speech_test.jsonl"
-    noise_manifest = Path(data_cfg.get("noise_manifest", "data/manifest/noise.jsonl"))
+    train_manifest = manifest_dir / "combined_train.jsonl"
+    val_manifest   = manifest_dir / "combined_val.jsonl"
 
-    train_dataset = VADASRDataset.from_manifests(
-        speech_manifest=speech_manifest_train,
-        noise_manifest=noise_manifest,
+    train_dataset = VADASRDataset.from_manifest(
+        manifest=train_manifest,
         tokenizer=tokenizer,
         augmentation=augmentation,
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),
         min_audio_len_sec=data_cfg.get("min_audio_len_sec", 0.5),
-        speech_noise_ratio=data_cfg.get("speech_noise_ratio", 0.7),
     )
 
-    val_dataset = VADASRDataset.from_manifests(
-        speech_manifest=speech_manifest_test,
-        noise_manifest=noise_manifest,
+    val_dataset = VADASRDataset.from_manifest(
+        manifest=val_manifest,
         tokenizer=tokenizer,
         augmentation=None,  # no augmentation for validation
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),
         min_audio_len_sec=data_cfg.get("min_audio_len_sec", 0.5),
-        speech_noise_ratio=0.5,  # balanced for validation
     )
 
     # Limit samples in debug mode
