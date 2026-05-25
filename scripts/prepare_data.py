@@ -832,6 +832,7 @@ def prepare_noise_manifest(
                 info = sf.info(str(audio_file))
                 entry = {
                     "audio_filepath": str(audio_file.resolve()),
+                    "text": " ",
                     "duration": info.duration,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1802,6 +1803,7 @@ def balance_noise_to_speech(
                 info = sf.info(str(audio_file))
                 entry = {
                     "audio_filepath": str(audio_file.resolve()),
+                    "text": " ",
                     "duration": info.duration,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -2114,6 +2116,57 @@ Examples:
         logger.warning(
             "No speech_train.jsonl found — skipping noise balancing."
         )
+
+    # ================================================================
+    # Step 5: Merge and Split into Train/Test/Val
+    # ================================================================
+    print("\n" + "=" * 60)
+    print("STEP 5: Merge speech and noise, then split into train/val/test")
+    print("=" * 60)
+
+    all_entries = []
+    
+    # Read all speech manifests
+    for split in args.splits:
+        manifest = out_dir / f"speech_{split}.jsonl"
+        if manifest.exists():
+            with open(manifest, "r", encoding="utf-8") as f:
+                for line in f:
+                    all_entries.append(json.loads(line.strip()))
+                    
+    # Read noise manifest
+    if noise_manifest.exists():
+        with open(noise_manifest, "r", encoding="utf-8") as f:
+            for line in f:
+                all_entries.append(json.loads(line.strip()))
+                
+    if all_entries:
+        # Shuffle deterministically
+        random.seed(42)
+        random.shuffle(all_entries)
+        
+        total = len(all_entries)
+        train_end = int(total * 0.8)
+        val_end = int(total * 0.9)
+        
+        train_entries = all_entries[:train_end]
+        val_entries = all_entries[train_end:val_end]
+        test_entries = all_entries[val_end:]
+        
+        with open(out_dir / "combined_train.jsonl", "w", encoding="utf-8") as f:
+            for entry in train_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                
+        with open(out_dir / "combined_val.jsonl", "w", encoding="utf-8") as f:
+            for entry in val_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                
+        with open(out_dir / "combined_test.jsonl", "w", encoding="utf-8") as f:
+            for entry in test_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                
+        logger.info("Merged and split dataset: %d train, %d val, %d test",
+                    len(train_entries), len(val_entries), len(test_entries))
 
     # ================================================================
     # Summary
