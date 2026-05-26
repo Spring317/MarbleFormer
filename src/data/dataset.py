@@ -54,6 +54,8 @@ class VADASRDataset(Dataset):
         will simply be skipped for those batches by the trainer).
     augmentation : Any | None
         Optional augmentation pipeline applied to the waveform.
+    max_decode_retries : int
+        Number of retries with random samples if audio decode fails.
     """
 
     def __init__(
@@ -64,6 +66,7 @@ class VADASRDataset(Dataset):
         min_audio_len_sec: float = 0.5,
         tokenizer: Any = None,
         augmentation: Any = None,
+        max_decode_retries: int = 3,
     ) -> None:
         self.data = data
         self.sample_rate = sample_rate
@@ -71,6 +74,7 @@ class VADASRDataset(Dataset):
         self.min_samples = int(min_audio_len_sec * sample_rate)
         self.tokenizer = tokenizer
         self.augmentation = augmentation
+        self.max_decode_retries = max(0, int(max_decode_retries))
 
         if tokenizer is None:
             logger.warning(
@@ -89,14 +93,46 @@ class VADASRDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> dict:
-        entry = self.data[idx]
+        attempts = 0
+        last_err: Exception | None = None
+        while True:
+            entry = self.data[idx]
 
-        audio_path = entry["audio_filepath"]
-        text = entry.get("text", "")
-        is_speech = bool(entry.get("is_speech", False))
+            audio_path = entry["audio_filepath"]
+            text = entry.get("text", "")
+            is_speech = bool(entry.get("is_speech", False))
 
-        # Load audio
-        waveform, sr = torchaudio.load(audio_path)
+            try:
+                # Load audio
+                waveform, sr = torchaudio.load(audio_path)
+                break
+            except Exception as exc:
+                last_err = exc
+                attempts += 1
+                if attempts > self.max_decode_retries:
+                    logger.error(
+                        "Failed to decode audio after %d retries. "
+                        "Falling back to silence. Last path: %s (idx=%d). Error: %s",
+                        self.max_decode_retries, audio_path, idx, exc,
+                    )
+                    fallback_len = max(1, self.min_samples)
+                    waveform = torch.zeros(1, fallback_len)
+                    sr = self.sample_rate
+                    text = ""
+                    is_speech = False
+                    break
+                logger.warning(
+                    "Failed to decode audio (idx=%d, path=%s). "
+                    "Retrying with random sample (%d/%d). Error: %s",
+                    idx, audio_path, attempts, self.max_decode_retries, exc,
+                )
+                idx = random.randrange(len(self.data))
+
+        if last_err is not None and attempts > 0:
+            logger.debug(
+                "Recovered from audio decode error after %d retries.",
+                attempts,
+            )
 
         # Resample if needed
         if sr != self.sample_rate:
