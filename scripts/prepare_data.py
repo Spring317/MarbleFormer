@@ -1942,6 +1942,9 @@ Examples:
     noise_manifest = Path(data_cfg.get(
         "noise_manifest", "data/manifest/noise.jsonl"
     ))
+    synthetic_noise_dir = Path(data_cfg.get(
+        "synthetic_noise_dir", "data/synthetic_noise"
+    ))
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2109,12 +2112,11 @@ Examples:
         print(f"    Samples       : {noise_stats.num_samples:>10,}")
         print(f"    Total hours   : {noise_stats.total_hours:>10.2f}")
 
-        synthetic_dir = data_folder / "synthetic_noise"
         balance_noise_to_speech(
             speech_manifest=train_speech_manifest,
             noise_manifest=noise_manifest,
             noise_dir=background_data_root,
-            synthetic_dir=synthetic_dir,
+            synthetic_dir=synthetic_noise_dir,
             sample_rate=TARGET_SAMPLE_RATE,
         )
     else:
@@ -2181,7 +2183,7 @@ Examples:
     print("=" * 60)
     print(f"  Speech data root      : {speech_data_root}")
     print(f"  Background noise root : {background_data_root}")
-    print(f"  Synthetic noise dir   : {data_folder / 'synthetic_noise'}")
+    print(f"  Synthetic noise dir   : {synthetic_noise_dir}")
     print(f"  Manifest output dir   : {out_dir}")
     print()
     for manifest in sorted(out_dir.glob("*.jsonl")):

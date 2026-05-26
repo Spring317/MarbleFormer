@@ -67,6 +67,7 @@ data:
   noise_manifest: "/home/datasets/manifest/noise.jsonl"
   public_datasets_download_dir: "/home/datasets/public_datasets_raw"
   public_datasets_noise_dir: "/home/datasets/public_datasets_noise"
+  synthetic_noise_dir: "/home/datasets/synthetic_noise"
 
   # Manifest output
   manifest_dir: "/home/datasets/data/manifest"
@@ -137,4 +138,3 @@ evaluation:
   batch_size: 32
   gate_threshold_search: true
   threshold_range: [0.3, 0.7]
-
