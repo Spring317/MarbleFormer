@@ -168,6 +168,7 @@ class VADASRDataset(Dataset):
             "text":      text,           # raw transcript (or "")
             "token_ids": token_ids,      # list[int], empty for noise
             "has_voice": is_speech,      # bool — VAD label
+            "audio_path": audio_path,    # str — source audio path
         }
 
     # ------------------------------------------------------------------

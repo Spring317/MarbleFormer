@@ -49,6 +49,7 @@ class Evaluator:
         self,
         dataloader: DataLoader,
         threshold: float | None = None,
+        save_transcripts_path: str | None = None,
     ) -> FullMetrics:
         """Run evaluation on a dataset.
 
@@ -71,6 +72,7 @@ class Evaluator:
         if threshold is not None:
             self.model.vad_gate.threshold = threshold
 
+        transcripts = []
         try:
             for batch in tqdm(
                 dataloader,
@@ -82,6 +84,7 @@ class Evaluator:
                 wav_lengths = batch["wav_lengths"].to(self.device)
                 has_voice_gt = batch["has_voice"]
                 texts = batch["texts"]
+                audio_paths = batch.get("audio_paths", [""] * len(texts))
 
                 t0 = time.time()
                 output = self.model.inference(waveform, wav_lengths)
@@ -106,6 +109,11 @@ class Evaluator:
                     predictions.append(pred_text)
 
                 calc.update_asr(predictions, texts)
+                if save_transcripts_path is not None:
+                    for audio_path, pred_text, ref_text in zip(
+                        audio_paths, predictions, texts
+                    ):
+                        transcripts.append((audio_path, pred_text, ref_text))
 
                 # Efficiency
                 audio_dur = wav_lengths.float().sum().item() / 16000
@@ -117,6 +125,17 @@ class Evaluator:
                     )
         finally:
             self.model.vad_gate.threshold = original_threshold
+
+        if save_transcripts_path is not None:
+            with open(save_transcripts_path, "w", encoding="utf-8") as f:
+                for audio_path, pred_text, ref_text in transcripts:
+                    safe_audio = audio_path.replace("\t", " ").replace("\n", " ")
+                    safe_pred = pred_text.replace("\t", " ").replace("\n", " ")
+                    safe_ref = ref_text.replace("\t", " ").replace("\n", " ")
+                    f.write(f"audio_path: {safe_audio}\n")
+                    f.write(f"prediction: {safe_pred}\n")
+                    f.write(f"reference: {safe_ref}\n")
+                    f.write("---\n")
 
         return calc.compute()
 

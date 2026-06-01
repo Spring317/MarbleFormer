@@ -42,6 +42,7 @@ class VADASRCollator:
             [s["has_voice"] for s in batch], dtype=torch.bool
         )
         texts = [s["text"] for s in batch]
+        audio_paths = [s.get("audio_path", "") for s in batch]
 
         # Pad waveforms
         max_wav_len = max(w.size(0) for w in waveforms)
@@ -68,4 +69,5 @@ class VADASRCollator:
             "token_lengths": token_lengths,
             "has_voice": has_voice,
             "texts": texts,
+            "audio_paths": audio_paths,
         }

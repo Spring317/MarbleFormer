@@ -59,6 +59,14 @@ def main() -> None:
         "--split", type=str, default="test",
         help="Data split to evaluate",
     )
+    parser.add_argument(
+        "--export_transcripts", type=str, default=None,
+        help="Path to save transcripts in plain text format",
+    )
+    parser.add_argument(
+        "--eval_batch_size", type=int, default=None,
+        help="Override evaluation batch size (e.g., 1 for fairness checks)",
+    )
     args = parser.parse_args()
 
     if not args.checkpoint and not args.nemo_weights:
@@ -100,9 +108,10 @@ def main() -> None:
     )
 
     collator = VADASRCollator()
+    eval_batch_size = args.eval_batch_size or cfg["evaluation"]["batch_size"]
     test_loader = DataLoader(
         test_dataset,
-        batch_size=cfg["evaluation"]["batch_size"],
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=data_cfg.get("num_workers", 4),
         collate_fn=collator,
@@ -152,7 +161,11 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info("BEST THRESHOLD: %.3f", best_thr)
     else:
-        metrics = evaluator.evaluate(test_loader, threshold=args.threshold)
+        metrics = evaluator.evaluate(
+            test_loader,
+            threshold=args.threshold,
+            save_transcripts_path=args.export_transcripts,
+        )
 
     # Print results
     logger.info("=" * 60)
@@ -173,6 +186,9 @@ def main() -> None:
     logger.info("  Avg Inference : %.2f ms", metrics.efficiency.avg_inference_ms)
     logger.info("  RTF           : %.4f", metrics.efficiency.rtf)
     logger.info("  Exit Rate     : %.2f%%", metrics.efficiency.exit_rate * 100)
+
+    if args.export_transcripts:
+        logger.info("Saved transcripts: %s", args.export_transcripts)
 
 
 if __name__ == "__main__":
