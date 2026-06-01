@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from ..models.vadasr_model import VADASRModel
 from .metrics import MetricsCalculator, FullMetrics
@@ -71,7 +72,12 @@ class Evaluator:
             self.model.vad_gate.threshold = threshold
 
         try:
-            for batch in dataloader:
+            for batch in tqdm(
+                dataloader,
+                desc="Evaluating",
+                unit="batch",
+                ascii=True,
+            ):
                 waveform = batch["waveform"].to(self.device)
                 wav_lengths = batch["wav_lengths"].to(self.device)
                 has_voice_gt = batch["has_voice"]
