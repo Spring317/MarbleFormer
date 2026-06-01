@@ -220,6 +220,11 @@ python scripts/evaluate.py --config configs/default.yaml \
 # override threshold manually
 python scripts/evaluate.py --config configs/default.yaml \
     --checkpoint checkpoints/best.pt --threshold 0.45
+
+# export transcripts (plain text) and force eval batch size
+python scripts/evaluate.py --config configs/default.yaml \
+    --checkpoint checkpoints/best.pt --split val \
+    --eval_batch_size 1 --export_transcripts eval_transcripts.txt
 ```
 
 ### 5. inference
