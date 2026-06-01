@@ -83,6 +83,10 @@ def main() -> None:
         "--freeze_conformer", action="store_true",
         help="Freeze Conformer encoder (phase-1: only train MarbleNet + gate + CTC head)",
     )
+    parser.add_argument(
+        "--freeze_vad", action="store_true",
+        help="Freeze VAD branch (MarbleNet + gate) to train ASR only",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -165,23 +169,6 @@ def main() -> None:
     logger.info("Building model...")
     model = VADASRModel.from_config(cfg, vocab_size=tokenizer.vocab_size)
 
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info("Total parameters: %s", f"{total_params:,}")
-    logger.info("Trainable parameters: %s", f"{trainable_params:,}")
-
-    # Parameter breakdown
-    for name, module in [
-        ("MelExtractor", model.mel_extractor),
-        ("MarbleNet", model.marblenet),
-        ("VADGate", model.vad_gate),
-        ("Conformer", model.conformer),
-        ("CTCHead", model.ctc_head),
-    ]:
-        n = sum(p.numel() for p in module.parameters())
-        logger.info("  %-15s: %s params", name, f"{n:,}")
-
     # ---- Loss ----
     criterion = VADASRLoss.from_config(train_cfg, blank_id=tokenizer.blank_id)
 
@@ -207,11 +194,35 @@ def main() -> None:
             nemo_diag["ctc_loaded"],
             len(nemo_diag["skipped"]),
         )
-    elif args.freeze_conformer:
-        # Freeze without loading NeMo weights (e.g., resuming from own checkpoint)
-        logger.info("Freezing Conformer encoder (no NeMo weights)")
+
+    # ---- Freeze branches (optional) ----
+    if args.freeze_conformer:
+        logger.info("Freezing Conformer encoder")
         for param in model.conformer.parameters():
             param.requires_grad = False
+    if args.freeze_vad:
+        logger.info("Freezing VAD branch (MarbleNet + gate)")
+        for param in model.marblenet.parameters():
+            param.requires_grad = False
+        for param in model.vad_gate.parameters():
+            param.requires_grad = False
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info("Total parameters: %s", f"{total_params:,}")
+    logger.info("Trainable parameters: %s", f"{trainable_params:,}")
+
+    # Parameter breakdown
+    for name, module in [
+        ("MelExtractor", model.mel_extractor),
+        ("MarbleNet", model.marblenet),
+        ("VADGate", model.vad_gate),
+        ("Conformer", model.conformer),
+        ("CTCHead", model.ctc_head),
+    ]:
+        n = sum(p.numel() for p in module.parameters())
+        logger.info("  %-15s: %s params", name, f"{n:,}")
 
     # ---- Optimizer (separate LR groups for VAD vs ASR) ----
     vad_lr_scale = train_cfg.get("vad_lr_scale", 0.1)
@@ -220,17 +231,39 @@ def main() -> None:
 
     # Group 1: VAD branch (MarbleNet + VADGate) — converges fast, use lower LR
     vad_params = list(model.marblenet.parameters()) + list(model.vad_gate.parameters())
+    vad_params = [p for p in vad_params if p.requires_grad]
     # Group 2: ASR branch (Conformer + CTC Head) — needs higher LR
     asr_params = list(model.conformer.parameters()) + list(model.ctc_head.parameters())
+    asr_params = [p for p in asr_params if p.requires_grad]
 
-    param_groups = [
-        {"params": vad_params, "lr": base_lr * vad_lr_scale, "name": "vad"},
-        {"params": asr_params, "lr": base_lr, "name": "asr"},
-    ]
-    logger.info(
-        "Optimizer LR groups: VAD=%.6f, ASR=%.6f",
-        base_lr * vad_lr_scale, base_lr,
-    )
+    param_groups = []
+    if vad_params:
+        param_groups.append(
+            {"params": vad_params, "lr": base_lr * vad_lr_scale, "name": "vad"}
+        )
+    if asr_params:
+        param_groups.append(
+            {"params": asr_params, "lr": base_lr, "name": "asr"}
+        )
+
+    if not param_groups:
+        raise RuntimeError("No trainable parameters after freezing.")
+
+    if vad_params and asr_params:
+        logger.info(
+            "Optimizer LR groups: VAD=%.6f, ASR=%.6f",
+            base_lr * vad_lr_scale, base_lr,
+        )
+    elif vad_params:
+        logger.info(
+            "Optimizer LR groups: VAD=%.6f (ASR frozen)",
+            base_lr * vad_lr_scale,
+        )
+    else:
+        logger.info(
+            "Optimizer LR groups: ASR=%.6f (VAD frozen)",
+            base_lr,
+        )
 
     optimizer = torch.optim.AdamW(
         param_groups,

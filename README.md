@@ -199,6 +199,11 @@ python scripts/train.py --config configs/default.yaml \
 # phase 2: unfreeze conformer, train end-to-end (resume from phase 1)
 python scripts/train.py --config configs/default.yaml \
     --resume checkpoints/best.pt
+
+# optional: freeze VAD branch and train ASR only
+python scripts/train.py --config configs/default.yaml \
+    --resume checkpoints/best.pt \
+    --freeze_vad
 ```
 
 ### 4. evaluate
@@ -304,4 +309,3 @@ all hyperparameters are in `configs/default.yaml`. key sections:
 ## license
 
 apache 2.0
-
