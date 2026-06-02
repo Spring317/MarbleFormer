@@ -34,6 +34,48 @@ logging.basicConfig(
 logger = logging.getLogger("evaluate")
 
 
+def _profile_flops(
+    model: VADASRModel,
+    waveform: torch.Tensor,
+    wav_lengths: torch.Tensor,
+    device: torch.device,
+    threshold: float,
+) -> int | None:
+    if not hasattr(torch, "profiler"):
+        logger.warning("torch.profiler not available; skipping FLOPs/TOPS.")
+        return None
+
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if device.type == "cuda" and hasattr(torch.profiler.ProfilerActivity, "CUDA"):
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    original_threshold = model.vad_gate.threshold
+    model.vad_gate.threshold = threshold
+    try:
+        with torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            with_flops=True,
+        ) as prof:
+            with torch.inference_mode():
+                _ = model.inference(waveform, wav_lengths)
+    except Exception as e:
+        logger.warning("FLOPs profiling failed: %s", e)
+        return None
+    finally:
+        model.vad_gate.threshold = original_threshold
+
+    total_flops = 0
+    for evt in prof.key_averages():
+        flops = getattr(evt, "flops", None)
+        if flops:
+            total_flops += flops
+    if total_flops == 0:
+        logger.warning("Profiler returned 0 FLOPs; check torch build.")
+        return None
+    return total_flops
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate VADASR model")
     parser.add_argument(
@@ -66,6 +108,10 @@ def main() -> None:
     parser.add_argument(
         "--eval_batch_size", type=int, default=None,
         help="Override evaluation batch size (e.g., 1 for fairness checks)",
+    )
+    parser.add_argument(
+        "--profile_flops", action="store_true",
+        help="Profile FLOPs/TOPS on a single batch",
     )
     args = parser.parse_args()
 
@@ -151,6 +197,27 @@ def main() -> None:
     # Evaluator
     evaluator = Evaluator(model=model, tokenizer=tokenizer, device=device)
 
+    # Optional FLOPs/TOPS profiling on a single batch
+    flops_early = None
+    flops_full = None
+    prof_audio_s = None
+    if args.profile_flops:
+        try:
+            prof_batch = next(iter(test_loader))
+        except StopIteration:
+            logger.warning("No data available for FLOPs profiling.")
+        else:
+            waveform = prof_batch["waveform"].to(device)
+            wav_lengths = prof_batch["wav_lengths"].to(device)
+            prof_audio_s = wav_lengths.sum().item() / cfg["features"]["sample_rate"]
+
+            flops_early = _profile_flops(
+                evaluator.model, waveform, wav_lengths, device, threshold=2.0
+            )
+            flops_full = _profile_flops(
+                evaluator.model, waveform, wav_lengths, device, threshold=-1.0
+            )
+
     if args.threshold_search:
         eval_cfg = cfg.get("evaluation", {})
         thr_range = tuple(eval_cfg.get("threshold_range", [0.3, 0.7]))
@@ -186,6 +253,17 @@ def main() -> None:
     logger.info("  Avg Inference : %.2f ms", metrics.efficiency.avg_inference_ms)
     logger.info("  RTF           : %.4f", metrics.efficiency.rtf)
     logger.info("  Exit Rate     : %.2f%%", metrics.efficiency.exit_rate * 100)
+
+    if flops_early is not None and flops_full is not None and prof_audio_s:
+        logger.info("")
+        logger.info("Compute (profile batch):")
+        logger.info("  Audio Seconds : %.3f", prof_audio_s)
+        early_gflops = flops_early / 1e9
+        full_gflops = flops_full / 1e9
+        early_tops = (flops_early / max(1e-6, prof_audio_s)) / 1e12
+        full_tops = (flops_full / max(1e-6, prof_audio_s)) / 1e12
+        logger.info("  Early-Exit    : %.3f GFLOPs | %.6f TOPS@1x", early_gflops, early_tops)
+        logger.info("  Full ASR      : %.3f GFLOPs | %.6f TOPS@1x", full_gflops, full_tops)
 
     if args.export_transcripts:
         logger.info("Saved transcripts: %s", args.export_transcripts)
