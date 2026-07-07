@@ -36,10 +36,10 @@ gate:
 # --- QuartzNet Encoder (ASR back-end) ---
 quartznet:
   input_channels: 128
-  num_sub_blocks: 5
-  channels: [256, 256, 512, 512, 512]
+  num_sub_blocks: 3
+  channels: [256, 256, 256, 512, 512]
   kernel_sizes: [33, 39, 51, 63, 75]
-  epilogue_channels: [512, 1024]
+  epilogue_channels: [512, 512]
   epilogue_kernels: [87, 1]
   dropout: 0.1
 
@@ -105,7 +105,7 @@ training:
   seed: 42
 
   # Separate LR scaling for VAD branch (MarbleNet + Gate)
-  # VAD converges much faster (~300K params vs ~18M QuartzNet)
+  # VAD converges much faster (~300K params vs ~4M QuartzNet)
   vad_lr_scale: 0.1                # VAD branch gets LR * 0.1
 
   # Loss weights
