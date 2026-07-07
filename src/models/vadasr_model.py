@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from ..features.mel_extractor import MelSpectrogramExtractor
 from .marblenet_encoder import MarbleNetEncoder
-from .conformer_encoder import ConformerEncoder
+from .quartznet_encoder import QuartzNetEncoder
 from .vad_gate import VADGate
 from .ctc_head import CTCHead
 
@@ -37,7 +37,7 @@ class VADASROutput:
 class VADASRModel(nn.Module):
     """Gated early exit VAD-ASR model.
 
-    Composes MarbleNet (VAD encoder) + VAD Gate + Conformer (ASR encoder)
+    Composes MarbleNet (VAD encoder) + VAD Gate + QuartzNet (ASR encoder)
     + CTC Head into a unified model with early exit capability.
 
     Parameters
@@ -48,8 +48,8 @@ class VADASRModel(nn.Module):
         VAD encoder (1D separable conv blocks).
     vad_gate : VADGate
         Binary gate for early exit decision.
-    conformer : ConformerEncoder
-        ASR encoder (self-attention + conv blocks).
+    quartznet : QuartzNetEncoder
+        ASR encoder (1D depthwise separable conv blocks).
     ctc_head : CTCHead
         CTC projection layer.
     """
@@ -59,14 +59,14 @@ class VADASRModel(nn.Module):
         mel_extractor: MelSpectrogramExtractor,
         marblenet: MarbleNetEncoder,
         vad_gate: VADGate,
-        conformer: ConformerEncoder,
+        quartznet: QuartzNetEncoder,
         ctc_head: CTCHead,
     ) -> None:
         super().__init__()
         self.mel_extractor = mel_extractor
         self.marblenet = marblenet
         self.vad_gate = vad_gate
-        self.conformer = conformer
+        self.quartznet = quartznet
         self.ctc_head = ctc_head
 
     # ------------------------------------------------------------------
@@ -79,13 +79,13 @@ class VADASRModel(nn.Module):
         mel = MelSpectrogramExtractor.from_config(cfg["features"])
         marble = MarbleNetEncoder.from_config(cfg["marblenet"])
         gate = VADGate.from_config(cfg["gate"], input_dim=marble.output_channels)
-        conformer = ConformerEncoder.from_config(cfg["conformer"])
+        quartznet = QuartzNetEncoder.from_config(cfg["quartznet"])
         ctc = CTCHead.from_config(
             cfg["ctc"],
-            encoder_dim=conformer.encoder_dim,
+            encoder_dim=quartznet.encoder_dim,
             vocab_size=vocab_size,
         )
-        return cls(mel, marble, gate, conformer, ctc)
+        return cls(mel, marble, gate, quartznet, ctc)
 
     # ------------------------------------------------------------------
     # Training forward (both branches always execute)
@@ -119,11 +119,11 @@ class VADASRModel(nn.Module):
         gate_logits = self.vad_gate(marble_out, marble_lengths)
         has_voice = self.vad_gate.decide(gate_logits)
 
-        # Conformer encoder (always runs during training)
-        conformer_out, ctc_lengths = self.conformer(marble_out, marble_lengths)
+        # QuartzNet encoder (always runs during training)
+        quartznet_out, ctc_lengths = self.quartznet(marble_out, marble_lengths)
 
         # CTC head
-        ctc_log_probs = self.ctc_head(conformer_out)
+        ctc_log_probs = self.ctc_head(quartznet_out)
 
         return VADASROutput(
             gate_logits=gate_logits,
@@ -144,7 +144,7 @@ class VADASRModel(nn.Module):
     ) -> VADASROutput:
         """Inference forward pass with gated early exit.
 
-        If the gate predicts no speech, the Conformer and CTC head are
+        If the gate predicts no speech, the QuartzNet and CTC head are
         skipped entirely — saving compute.
 
         Parameters
@@ -177,10 +177,10 @@ class VADASRModel(nn.Module):
         marble_voice = marble_out[voice_indices]
         lengths_voice = marble_lengths[voice_indices]
 
-        conformer_out, ctc_lengths = self.conformer(
+        quartznet_out, ctc_lengths = self.quartznet(
             marble_voice, lengths_voice
         )
-        ctc_log_probs = self.ctc_head(conformer_out)
+        ctc_log_probs = self.ctc_head(quartznet_out)
 
         # Reconstruct full-batch output (None for non-speech)
         batch_size = waveform.size(0)

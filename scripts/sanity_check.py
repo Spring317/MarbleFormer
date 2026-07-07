@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.features.mel_extractor import MelSpectrogramExtractor
 from src.models.marblenet_encoder import MarbleNetEncoder
-from src.models.conformer_encoder import ConformerEncoder
+from src.models.quartznet_encoder import QuartzNetEncoder
 from src.models.vad_gate import VADGate
 from src.models.ctc_head import CTCHead
 from src.models.vadasr_model import VADASRModel
@@ -48,7 +48,7 @@ def main() -> None:
         ("MelExtractor", model.mel_extractor),
         ("MarbleNet", model.marblenet),
         ("VADGate", model.vad_gate),
-        ("Conformer", model.conformer),
+        ("QuartzNet", model.quartznet),
         ("CTCHead", model.ctc_head),
     ]:
         n = sum(p.numel() for p in mod.parameters())

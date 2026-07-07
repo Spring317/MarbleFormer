@@ -1,6 +1,6 @@
 # ============================================================================
 # VADASR — Gated Early Exit Model Configuration
-# MarbleNet (VAD) + Conformer (ASR) with CTC Decoder
+# MarbleNet (VAD) + QuartzNet (ASR) with CTC Decoder
 # ============================================================================
 
 # --- Audio Feature Extraction ---
@@ -33,16 +33,15 @@ gate:
   threshold: 0.5         # inference-time decision boundary
   temperature: 1.0       # sigmoid temperature scaling
 
-# --- Conformer Encoder (ASR back-end) ---
-conformer:
-  input_dim: 128         # must match marblenet epilogue output
-  num_heads: 4
-  ffn_dim: 704           # 176 * 4 (from NeMo ff_expansion_factor=4)
-  num_layers: 16         # Matches NeMo 13M Conformer
-  depthwise_conv_kernel_size: 31
+# --- QuartzNet Encoder (ASR back-end) ---
+quartznet:
+  input_channels: 128
+  num_sub_blocks: 5
+  channels: [256, 256, 512, 512, 512]
+  kernel_sizes: [33, 39, 51, 63, 75]
+  epilogue_channels: [512, 1024]
+  epilogue_kernels: [87, 1]
   dropout: 0.1
-  encoder_dim: 176       # Matches NeMo d_model=176
-  subsampling_factor: 4
 
 # --- CTC Head ---
 ctc:
@@ -106,7 +105,7 @@ training:
   seed: 42
 
   # Separate LR scaling for VAD branch (MarbleNet + Gate)
-  # VAD converges much faster (~300K params vs ~13M Conformer)
+  # VAD converges much faster (~300K params vs ~18M QuartzNet)
   vad_lr_scale: 0.1                # VAD branch gets LR * 0.1
 
   # Loss weights

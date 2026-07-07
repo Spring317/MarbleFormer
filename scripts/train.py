@@ -80,8 +80,8 @@ def main() -> None:
         help="Path to NeMo .nemo/.ckpt/.pth file for pretrained Conformer weights",
     )
     parser.add_argument(
-        "--freeze_conformer", action="store_true",
-        help="Freeze Conformer encoder (phase-1: only train MarbleNet + gate + CTC head)",
+        "--freeze_quartznet", action="store_true",
+        help="Freeze QuartzNet encoder (phase-1: only train MarbleNet + gate + CTC head)",
     )
     parser.add_argument(
         "--freeze_vad", action="store_true",
@@ -180,7 +180,7 @@ def main() -> None:
             args.nemo_weights,
             load_conformer=True,
             load_ctc_head=True,
-            freeze_loaded=args.freeze_conformer,
+            freeze_loaded=args.freeze_quartznet,
             device=device,
         )
         arch = nemo_diag["nemo_arch"]
@@ -196,9 +196,9 @@ def main() -> None:
         )
 
     # ---- Freeze branches (optional) ----
-    if args.freeze_conformer:
-        logger.info("Freezing Conformer encoder")
-        for param in model.conformer.parameters():
+    if args.freeze_quartznet:
+        logger.info("Freezing QuartzNet encoder")
+        for param in model.quartznet.parameters():
             param.requires_grad = False
     if args.freeze_vad:
         logger.info("Freezing VAD branch (MarbleNet + gate)")
@@ -218,7 +218,7 @@ def main() -> None:
         ("MelExtractor", model.mel_extractor),
         ("MarbleNet", model.marblenet),
         ("VADGate", model.vad_gate),
-        ("Conformer", model.conformer),
+        ("QuartzNet", model.quartznet),
         ("CTCHead", model.ctc_head),
     ]:
         n = sum(p.numel() for p in module.parameters())
@@ -232,8 +232,8 @@ def main() -> None:
     # Group 1: VAD branch (MarbleNet + VADGate) — converges fast, use lower LR
     vad_params = list(model.marblenet.parameters()) + list(model.vad_gate.parameters())
     vad_params = [p for p in vad_params if p.requires_grad]
-    # Group 2: ASR branch (Conformer + CTC Head) — needs higher LR
-    asr_params = list(model.conformer.parameters()) + list(model.ctc_head.parameters())
+    # Group 2: ASR branch (QuartzNet + CTC Head) — needs higher LR
+    asr_params = list(model.quartznet.parameters()) + list(model.ctc_head.parameters())
     asr_params = [p for p in asr_params if p.requires_grad]
 
     param_groups = []
