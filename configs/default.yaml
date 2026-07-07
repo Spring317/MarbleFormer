@@ -123,7 +123,7 @@ training:
   max_nan_batches_per_epoch: 50    # abort epoch if too many NaN batches
 
   # Checkpointing
-  checkpoint_dir: "checkpoints"
+  checkpoint_dir: "checkpoints_quartznet"
   save_every_n_epochs: 5
   keep_top_k: 3            # keep top-K best checkpoints by val WER
 

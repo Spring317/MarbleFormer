@@ -83,8 +83,13 @@ class QuartzNetEncoder(nn.Module):
 
         epilogue_layers = []
         for i in range(len(epilogue_channels)):
+            if epilogue_kernels[i] > 1:
+                conv = _DepthwiseSeparableConv1d(in_ch, epilogue_channels[i], kernel_size=epilogue_kernels[i], padding="same", bias=False)
+            else:
+                conv = nn.Conv1d(in_ch, epilogue_channels[i], kernel_size=epilogue_kernels[i], padding="same", bias=False)
+                
             epilogue_layers.append(nn.Sequential(
-                nn.Conv1d(in_ch, epilogue_channels[i], kernel_size=epilogue_kernels[i], padding="same", bias=False),
+                conv,
                 nn.BatchNorm1d(epilogue_channels[i]),
                 nn.ReLU(inplace=True),
                 nn.Dropout(p=dropout)
