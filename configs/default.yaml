@@ -1,6 +1,6 @@
 # ============================================================================
 # VADASR — Gated Early Exit Model Configuration
-# MarbleNet (VAD) + Conformer (ASR) with CTC Decoder
+# MarbleNet (VAD) + QuartzNet (ASR) with CTC Decoder
 # ============================================================================
 
 # --- Audio Feature Extraction ---
@@ -33,21 +33,22 @@ gate:
   threshold: 0.5         # inference-time decision boundary
   temperature: 1.0       # sigmoid temperature scaling
 
-# --- Conformer Encoder (ASR back-end) ---
-conformer:
-  input_dim: 128         # must match marblenet epilogue output
-  num_heads: 4
-  ffn_dim: 256
-  num_layers: 4
-  depthwise_conv_kernel_size: 31
+# --- QuartzNet Encoder (ASR back-end) ---
+quartznet:
+  input_channels: 128
+  num_sub_blocks: 5
+  channels: [256, 256, 256, 512, 512]
+  kernel_sizes: [33, 39, 51, 63, 75]
+  epilogue_channels: [512, 512]
+  epilogue_kernels: [87, 1]
   dropout: 0.1
-  encoder_dim: 256
-  subsampling_factor: 4
+  se_ratio: 8              # Squeeze-and-Excitation reduction ratio (0 = disabled)
 
 # --- CTC Head ---
 ctc:
   # vocab_size is set dynamically from tokenizer
   blank_id: 0            # CTC blank token index
+  add_blank: true
 
 # --- Tokenizer ---
 tokenizer:
@@ -58,18 +59,21 @@ tokenizer:
 # --- Dataset ---
 data:
   # Local BUD500 dataset (already downloaded — no re-download)
-  bud500_local_dir: "data/bud500"        # root dir with train/ and test/ subdirs
+  bud500_local_dir: "/home/datasets/viet_bud500"        # root dir with train/ and test/ subdirs
 
   # Background noise data
-  noise_dir: "data/background_noise"             # raw Freesound downloads (any format)
-  noise_resampled_dir: "data/background_noise_resampled"  # resampled 16kHz mono WAV
-  noise_manifest: "data/manifest/noise.jsonl"
+  noise_dir: "/home/datasets/background_noise"             # raw Freesound downloads (any format)
+  noise_resampled_dir: "/home/datasets/background_noise_resampled"  # resampled 16kHz mono WAV
+  noise_manifest: "/home/datasets/manifest/noise.jsonl"
+  public_datasets_download_dir: "/home/datasets/public_datasets_raw"
+  public_datasets_noise_dir: "/home/datasets/public_datasets_noise"
+  synthetic_noise_dir: "/home/datasets/synthetic_noise"
 
   # Manifest output
-  manifest_dir: "data/manifest"
+  manifest_dir: "/home/datasets/data/manifest"
 
   speech_noise_ratio: 0.7   # 70% speech, 30% noise per epoch
-  max_audio_len_sec: 15.0
+  max_audio_len_sec: 12.0
   min_audio_len_sec: 0.5
   num_workers: 8
   pin_memory: true
@@ -92,25 +96,35 @@ augmentation:
 
 # --- Training ---
 training:
-  batch_size: 64
-  gradient_accumulation_steps: 2
+  batch_size: 128
+  gradient_accumulation_steps: 1
   max_epochs: 100
-  learning_rate: 0.001
+  learning_rate: 0.0005            # halved from 0.001 for stability
   weight_decay: 0.0001
-  max_grad_norm: 5.0
+  max_grad_norm: 1.0               # tighter clipping (was 5.0) prevents gradient explosion
   use_amp: true
   seed: 42
+
+  # Separate LR scaling for VAD branch (MarbleNet + Gate)
+  # VAD converges much faster (~300K params vs ~4M QuartzNet)
+  vad_lr_scale: 0.1                # VAD branch gets LR * 0.1
 
   # Loss weights
   lambda_vad: 1.0
   lambda_ctc: 1.0
 
+  # CTC reduction (match NeMo)
+  ctc_reduction: "mean_batch"
+
   # Warmup + Cosine Annealing
-  warmup_steps: 1000
+  warmup_steps: 2500               # longer warmup (was 1000) for training stability
   min_lr: 0.00001
 
+  # NaN safety
+  max_nan_batches_per_epoch: 50    # abort epoch if too many NaN batches
+
   # Checkpointing
-  checkpoint_dir: "checkpoints"
+  checkpoint_dir: "checkpoints_quartznet"
   save_every_n_epochs: 5
   keep_top_k: 3            # keep top-K best checkpoints by val WER
 
@@ -121,7 +135,6 @@ training:
 
 # --- Evaluation ---
 evaluation:
-  batch_size: 32
+  batch_size: 128
   gate_threshold_search: true
   threshold_range: [0.3, 0.7]
-  threshold_steps: 9
