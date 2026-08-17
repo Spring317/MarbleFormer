@@ -36,12 +36,13 @@ gate:
 # --- QuartzNet Encoder (ASR back-end) ---
 quartznet:
   input_channels: 128
-  num_sub_blocks: 3
+  num_sub_blocks: 5
   channels: [256, 256, 256, 512, 512]
   kernel_sizes: [33, 39, 51, 63, 75]
   epilogue_channels: [512, 512]
   epilogue_kernels: [87, 1]
   dropout: 0.1
+  se_ratio: 8              # Squeeze-and-Excitation reduction ratio (0 = disabled)
 
 # --- CTC Head ---
 ctc:
