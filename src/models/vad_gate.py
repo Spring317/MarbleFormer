@@ -73,14 +73,18 @@ class VADGate(nn.Module):
         logits : Tensor [B]
             Raw logits (apply sigmoid to get probabilities).
         """
-        # Masked global average pooling
-        batch_size = encoder_out.size(0)
-        pooled = []
-        for i in range(batch_size):
-            valid_len = feat_lengths[i].item()
-            valid_len = max(1, min(valid_len, encoder_out.size(2)))
-            pooled.append(encoder_out[i, :, :valid_len].mean(dim=-1))
-        pooled_tensor = torch.stack(pooled, dim=0)  # [B, C]
+        if feat_lengths is None:
+            # Static global average pooling (for Vitis AI tracing)
+            pooled_tensor = encoder_out.mean(dim=-1)
+        else:
+            # Masked global average pooling (for training)
+            batch_size = encoder_out.size(0)
+            pooled = []
+            for i in range(batch_size):
+                valid_len = feat_lengths[i].item()
+                valid_len = max(1, min(valid_len, encoder_out.size(2)))
+                pooled.append(encoder_out[i, :, :valid_len].mean(dim=-1))
+            pooled_tensor = torch.stack(pooled, dim=0)  # [B, C]
 
         logits = self.classifier(pooled_tensor).squeeze(-1)  # [B]
         return logits / self.temperature

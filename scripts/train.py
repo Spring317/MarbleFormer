@@ -6,6 +6,8 @@ Usage:
     python scripts/train.py --config configs/default.yaml
     python scripts/train.py --config configs/default.yaml --debug --max_samples 10 --max_epochs 50
     python scripts/train.py --config configs/default.yaml --resume checkpoints/best.pt
+    python scripts/train.py --config configs/default.yaml --nemo_weights path/to/model.nemo
+    python scripts/train.py --config configs/default.yaml --nemo_weights path/to/model.pth --freeze_quartznet
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from src.models.vadasr_model import VADASRModel
 from src.training.loss import VADASRLoss
 from src.training.scheduler import WarmupCosineScheduler
 from src.training.trainer import Trainer
+from src.models.nemo_loader import load_nemo_weights
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +75,18 @@ def main() -> None:
         "--max_epochs", type=int, default=None,
         help="Override max epochs",
     )
+    parser.add_argument(
+        "--nemo_weights", type=str, default=None,
+        help="Path to NeMo .nemo/.ckpt/.pth file for pretrained weights",
+    )
+    parser.add_argument(
+        "--freeze_quartznet", action="store_true",
+        help="Freeze QuartzNet encoder (phase-1: only train MarbleNet + gate + CTC head)",
+    )
+    parser.add_argument(
+        "--freeze_vad", action="store_true",
+        help="Freeze VAD branch (MarbleNet + gate) to train ASR only",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -102,30 +117,25 @@ def main() -> None:
     # ---- Datasets ----
     logger.info("Loading datasets...")
     manifest_dir = Path(data_cfg.get("manifest_dir", "data/manifest"))
-    speech_manifest_train = manifest_dir / "speech_train.jsonl"
-    speech_manifest_test = manifest_dir / "speech_test.jsonl"
-    noise_manifest = Path(data_cfg.get("noise_manifest", "data/manifest/noise.jsonl"))
+    train_manifest = manifest_dir / "combined_train.jsonl"
+    val_manifest   = manifest_dir / "combined_val.jsonl"
 
-    train_dataset = VADASRDataset.from_manifests(
-        speech_manifest=speech_manifest_train,
-        noise_manifest=noise_manifest,
+    train_dataset = VADASRDataset.from_manifest(
+        manifest=train_manifest,
         tokenizer=tokenizer,
         augmentation=augmentation,
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),
         min_audio_len_sec=data_cfg.get("min_audio_len_sec", 0.5),
-        speech_noise_ratio=data_cfg.get("speech_noise_ratio", 0.7),
     )
 
-    val_dataset = VADASRDataset.from_manifests(
-        speech_manifest=speech_manifest_test,
-        noise_manifest=noise_manifest,
+    val_dataset = VADASRDataset.from_manifest(
+        manifest=val_manifest,
         tokenizer=tokenizer,
         augmentation=None,  # no augmentation for validation
         sample_rate=cfg["features"]["sample_rate"],
         max_audio_len_sec=data_cfg.get("max_audio_len_sec", 15.0),
         min_audio_len_sec=data_cfg.get("min_audio_len_sec", 0.5),
-        speech_noise_ratio=0.5,  # balanced for validation
     )
 
     # Limit samples in debug mode
@@ -159,6 +169,44 @@ def main() -> None:
     logger.info("Building model...")
     model = VADASRModel.from_config(cfg, vocab_size=tokenizer.vocab_size)
 
+    # ---- Loss ----
+    criterion = VADASRLoss.from_config(train_cfg, blank_id=tokenizer.blank_id)
+
+    # ---- Load NeMo pretrained weights (optional) ----
+    if args.nemo_weights:
+        logger.info("Loading NeMo pretrained weights...")
+        nemo_diag = load_nemo_weights(
+            model,
+            args.nemo_weights,
+            load_conformer=True,  # nemo_loader maps these to quartznet internally
+            load_ctc_head=True,
+            freeze_loaded=args.freeze_quartznet,
+            device=device,
+        )
+        arch = nemo_diag["nemo_arch"]
+        logger.info(
+            "NeMo model: %s (d_model=%d, n_layers=%d)",
+            arch["model_type"], arch["d_model"], arch["n_layers"],
+        )
+        logger.info(
+            "Loaded: %d encoder + %d ctc params, %d skipped",
+            nemo_diag["conformer_loaded"],
+            nemo_diag["ctc_loaded"],
+            len(nemo_diag["skipped"]),
+        )
+
+    # ---- Freeze branches (optional) ----
+    if args.freeze_quartznet:
+        logger.info("Freezing QuartzNet encoder")
+        for param in model.quartznet.parameters():
+            param.requires_grad = False
+    if args.freeze_vad:
+        logger.info("Freezing VAD branch (MarbleNet + gate)")
+        for param in model.marblenet.parameters():
+            param.requires_grad = False
+        for param in model.vad_gate.parameters():
+            param.requires_grad = False
+
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -170,20 +218,57 @@ def main() -> None:
         ("MelExtractor", model.mel_extractor),
         ("MarbleNet", model.marblenet),
         ("VADGate", model.vad_gate),
-        ("Conformer", model.conformer),
+        ("QuartzNet", model.quartznet),
         ("CTCHead", model.ctc_head),
     ]:
         n = sum(p.numel() for p in module.parameters())
         logger.info("  %-15s: %s params", name, f"{n:,}")
 
-    # ---- Loss ----
-    criterion = VADASRLoss.from_config(train_cfg, blank_id=tokenizer.blank_id)
+    # ---- Optimizer (separate LR groups for VAD vs ASR) ----
+    vad_lr_scale = train_cfg.get("vad_lr_scale", 0.1)
+    base_lr = train_cfg["learning_rate"]
+    weight_decay = train_cfg.get("weight_decay", 0.0001)
 
-    # ---- Optimizer ----
+    # Group 1: VAD branch (MarbleNet + VADGate) — converges fast, use lower LR
+    vad_params = list(model.marblenet.parameters()) + list(model.vad_gate.parameters())
+    vad_params = [p for p in vad_params if p.requires_grad]
+    # Group 2: ASR branch (QuartzNet + CTC Head) — needs higher LR
+    asr_params = list(model.quartznet.parameters()) + list(model.ctc_head.parameters())
+    asr_params = [p for p in asr_params if p.requires_grad]
+
+    param_groups = []
+    if vad_params:
+        param_groups.append(
+            {"params": vad_params, "lr": base_lr * vad_lr_scale, "name": "vad"}
+        )
+    if asr_params:
+        param_groups.append(
+            {"params": asr_params, "lr": base_lr, "name": "asr"}
+        )
+
+    if not param_groups:
+        raise RuntimeError("No trainable parameters after freezing.")
+
+    if vad_params and asr_params:
+        logger.info(
+            "Optimizer LR groups: VAD=%.6f, ASR=%.6f",
+            base_lr * vad_lr_scale, base_lr,
+        )
+    elif vad_params:
+        logger.info(
+            "Optimizer LR groups: VAD=%.6f (ASR frozen)",
+            base_lr * vad_lr_scale,
+        )
+    else:
+        logger.info(
+            "Optimizer LR groups: ASR=%.6f (VAD frozen)",
+            base_lr,
+        )
+
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_cfg["learning_rate"],
-        weight_decay=train_cfg.get("weight_decay", 0.0001),
+        param_groups,
+        lr=base_lr,
+        weight_decay=weight_decay,
     )
 
     # ---- Scheduler ----
